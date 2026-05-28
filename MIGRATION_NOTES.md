@@ -22,7 +22,7 @@
 
 ### How the React bundle gets onto Flask in production
 
-**Current setup (chosen):** Flask reads `static/dist/index.html` + `static/dist/assets/*` from the filesystem and serves them via a custom route (`app.py` `spa()`). Build artifacts live at `static/dist/`, gitignored.
+**Current setup (chosen):** Flask reads `static/dist/index.html` + `static/dist/assets/*` from the filesystem and serves them via a custom route (`app.py` `spa()`). Build artifacts live at `static/dist/` and are **committed to git** so `uv run app.py` works on a fresh clone with no Node required. Frontend devs run `npm run build` before committing.
 
 **Alternative ways to mount the bundle on Flask** — for reference when we revisit Docker:
 

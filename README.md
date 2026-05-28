@@ -1,220 +1,149 @@
 # db-viewr
 
 A lightweight, self-hosted database client that runs in your browser.
-Built with Flask and plain HTML — no Electron, no heavy frontend framework, no build step.
+Backend is Flask + adapter classes per DB type; there are two UIs sharing the
+same Flask process:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  db-viewr                                    + New Connection   │
-├──────────────────┬──────────────────────────────────────────────┤
-│  pg  production  │  users                          Query Editor │
-│  my  staging     ├─────────────────────────────────────────────┤
-│  sq  local.db    │  Schema ▸ 4 columns                         │
-│  mg  atlas       │                                              │
-│  dy  aws-dynamo  │  ┌──────┬──────────────┬──────────┬──────┐  │
-│                  │  │  id  │  email        │  name    │  pk  │  │
-│                  │  ├──────┼──────────────┼──────────┼──────┤  │
-│                  │  │  1   │ alice@…       │  Alice   │  ★   │  │
-│                  │  │  2   │ bob@…         │  Bob     │      │  │
-│                  │  └──────┴──────────────┴──────────┴──────┘  │
-│                  │  « Prev   Page 1 of 24 · 1,187 rows   Next » │
-└──────────────────┴──────────────────────────────────────────────┘
-```
+- **Legacy UI** at `/` — server-rendered Jinja templates (the original).
+- **SPA** at `/app/` — React + TypeScript single-page app for faster
+  navigation.
+
+Both call the same underlying adapters; pick whichever feels nicer.
 
 ## Features
 
-- **Multi-database** — PostgreSQL, MySQL / MariaDB, SQLite, MongoDB, DynamoDB
-- **Browse tables** — paginated rows, column schema, sortable columns
-- **Filter rows** — column + operator + value for SQL; JSON filter for MongoDB; FilterExpression for DynamoDB
-- **SQL / query editor** — run raw SQL, MongoDB pipelines, or DynamoDB PartiQL with `Ctrl+Enter`
-- **ERD viewer** — interactive SVG diagram with FK relationship lines, drag-to-rearrange, zoom/pan
-- **JSON field preview** — click any JSON/JSONB cell to see it pretty-printed in a modal
-- **Multiple connections** — save, edit, test, and switch between connections; one-click connectivity test
-- **Zero install for users** — pull the Docker image and go
+- Multi-database: PostgreSQL, MySQL/MariaDB, SQLite, MongoDB, DynamoDB
+- Browse tables with paginated rows, sort, simple + advanced filters
+- Inline row edit / insert; CSV export
+- SQL / Mongo / PartiQL query editor with per-connection history
+- ERD viewer
+- Multiple saved connections with connectivity test
 
-## Supported Databases
-
-| Database       | Driver         | Notes                                      |
-|----------------|----------------|--------------------------------------------|
-| PostgreSQL     | psycopg2       | FK relationships shown in ERD              |
-| MySQL/MariaDB  | PyMySQL        | FK relationships shown in ERD              |
-| SQLite         | stdlib sqlite3 | FK relationships shown in ERD              |
-| MongoDB        | pymongo        | JSON filter & aggregate pipeline support   |
-| DynamoDB       | boto3          | PartiQL query editor; local endpoint support |
+| Database       | Driver         |
+|----------------|----------------|
+| PostgreSQL     | psycopg2       |
+| MySQL/MariaDB  | PyMySQL        |
+| SQLite         | stdlib sqlite3 |
+| MongoDB        | pymongo        |
+| DynamoDB       | boto3          |
 
 ---
 
-## Quick Start — Docker (recommended)
+## Setup
 
-### 1 — Clone the repository
+Two prerequisites:
+
+1. [**uv**](https://github.com/astral-sh/uv) — Python package manager.
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+2. **Node 20+** — only needed if you want to (re)build the React SPA.
+   Skip if you only use the legacy UI at `/`.
+
+Clone and install Python deps:
 
 ```bash
-git clone https://github.com/your-org/db-viewr.git
+git clone https://github.com/hanzalakhan010/db-viewr.git
 cd db-viewr
+uv sync
 ```
 
-### 2 — Start the container
+That's it. `uv sync` creates `.venv/` and installs everything from
+`pyproject.toml` / `uv.lock`.
+
+### Run
 
 ```bash
-docker compose up -d
+uv run app.py
 ```
 
-Open **http://localhost:5000** in your browser.
-Your saved connections persist in a Docker volume and survive restarts and upgrades.
+Open **http://localhost:5001** — both UIs are live:
 
-### 3 — Connect to a database
+- Legacy UI: <http://localhost:5001/>
+- SPA: <http://localhost:5001/app/>
 
-Click **+ New Connection**, pick your database type, fill in the credentials, and hit **Save Connection**.
-Use the **Test** button on the connection list to verify connectivity before browsing.
+Saved connections live in `connections.json` next to `app.py`
+(gitignored, never committed). Query history lives in `query_history.json`.
 
----
+### (Optional) Rebuild the SPA
 
-## Connecting to databases inside Docker
-
-When db-viewr runs inside Docker it cannot reach `localhost` on your host machine.
-Use one of these approaches instead:
-
-### Other Docker containers
-
-Put db-viewr on the same Docker network as your database container and use the **service name** as the host:
-
-```yaml
-# docker-compose.yml
-services:
-  db-viewr:
-    # ...
-    networks:
-      - myapp_network
-
-networks:
-  myapp_network:
-    external: true
-```
-
-Then in the db-viewr UI set **Host** to the service name, e.g. `postgres` or `mysql`.
-
-### Host machine databases
-
-Use the Docker-internal gateway address instead of `localhost`:
-
-- **Linux:** `172.17.0.1`
-- **Mac / Windows:** `host.docker.internal`
-
-### SQLite files on your host
-
-Uncomment the volume mount in `docker-compose.yml`:
-
-```yaml
-volumes:
-  - /home/yourname/databases:/sqlite:ro   # host path : container path
-```
-
-Then set the **File path** in the UI to `/sqlite/mydb.db`.
-
----
-
-## Configuration
-
-All configuration is done via environment variables in `docker-compose.yml`.
-
-| Variable           | Default                      | Description                                        |
-|--------------------|------------------------------|----------------------------------------------------|
-| `CONNECTIONS_FILE` | `/data/connections.json`     | Where saved connections are stored                 |
-| `SECRET_KEY`       | random (changes on restart)  | Flask secret — set a stable value in docker-compose|
-| `AWS_ACCESS_KEY_ID`     | —                       | Optional global AWS credentials for DynamoDB       |
-| `AWS_SECRET_ACCESS_KEY` | —                       | Optional global AWS credentials for DynamoDB       |
-
-> **Security note:** `connections.json` stores passwords and AWS keys in plain text.
-> Do not expose port 5000 to a public network. This tool is designed for local / internal use.
-
----
-
-## Local Development (without Docker)
-
-### Requirements
-
-- Python 3.11+
-- The databases you want to connect to (running locally or remotely)
-
-### Setup
+The repo ships with a pre-built bundle at `static/dist/`. Rebuild only if
+you edit anything under `frontend/`:
 
 ```bash
-git clone https://github.com/your-org/db-viewr.git
-cd db-viewr
-
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-
-pip install -r requirements.txt
-
-python app.py
+cd frontend
+npm install        # first time only
+npm run build      # outputs ../static/dist/
 ```
 
-Open **http://localhost:5000**.
-
-The dev server reloads automatically on code changes (`debug=True`).
-Connections are saved to `connections.json` in the project root.
-
----
-
-## Upgrading
+For SPA development with HMR (auto-reload on save):
 
 ```bash
-# Pull the latest image (or rebuild from source)
-docker compose pull          # if using a published image
-# or
-docker compose build         # if building locally
-
-# Restart — named volume keeps your saved connections intact
-docker compose up -d
-
-# Backup connections before upgrading (optional)
-docker cp db-viewr:/data/connections.json ./connections-backup.json
+# terminal 1
+uv run app.py
+# terminal 2
+cd frontend && npm run dev
+# open http://localhost:5173/app/  (Vite proxies /api → :5001)
 ```
 
 ---
 
-## Project Structure
+## Why not Docker?
+
+Docker makes "connect to a DB running on your laptop" annoying — you have to
+remember `host.docker.internal` on Mac/Windows or `172.17.0.1` on Linux, and
+service-name resolution only works if the DB is also in a container on the
+same network. Since this tool is intentionally local-only, a plain uv-run
+process is friction-free. A Dockerfile + compose.yml are still in the repo
+for anyone who wants them, but they're not the recommended path.
+
+---
+
+## Configuration (optional)
+
+Environment variables, all optional:
+
+| Variable                | Default                    | Description                              |
+|-------------------------|----------------------------|------------------------------------------|
+| `CONNECTIONS_FILE`      | `./connections.json`       | Where saved connections persist          |
+| `QUERY_HISTORY_FILE`    | `./query_history.json`     | Per-connection query history             |
+| `SECRET_KEY`            | random per-process         | Flask session secret                     |
+| `AWS_ACCESS_KEY_ID`     | —                          | Fallback AWS creds for DynamoDB          |
+| `AWS_SECRET_ACCESS_KEY` | —                          | Fallback AWS creds for DynamoDB          |
+
+> **Security note:** `connections.json` stores passwords / AWS keys in
+> plaintext. Don't expose port 5001 to a public network. This is a
+> single-user local tool.
+
+---
+
+## Project layout
 
 ```
 db-viewr/
-├── app.py               # Flask app — all routes
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── adapters/
-│   ├── base.py          # Abstract BaseAdapter interface
-│   ├── postgres.py
-│   ├── mysql.py
-│   ├── sqlite.py
-│   ├── mongo.py
-│   └── dynamo.py
-├── templates/
-│   ├── base.html        # Sidebar layout
-│   ├── index.html       # Connection list
-│   ├── connection_form.html
-│   ├── tables.html      # Table browser
-│   ├── table_view.html  # Paginated rows + filter
-│   ├── query.html       # Query editor
-│   └── erd.html         # ERD diagram viewer
-└── static/
-    ├── style.css
-    ├── app.js           # Ctrl+Enter, JSON modal, connection test
-    └── erd.js           # SVG ERD renderer (drag, zoom, FK lines)
+├── app.py                 # Flask app: HTML routes + /api/* JSON endpoints + /app SPA mount
+├── pyproject.toml         # uv-managed Python deps
+├── adapters/              # one file per DB type, all extending BaseAdapter
+├── templates/             # legacy server-rendered UI (Jinja)
+├── static/
+│   ├── style.css / *.js   # legacy UI assets
+│   └── dist/              # built React SPA (gitignored; produced by `npm run build`)
+├── frontend/              # React + Vite + TS source for the SPA
+│   ├── src/
+│   └── package.json
+└── MIGRATION_NOTES.md     # decisions + open questions for the SPA migration
 ```
 
 ---
 
-## Adding a New Database Adapter
+## Adding a new database adapter
 
-1. Create `adapters/yourdb.py` extending `BaseAdapter`
-2. Implement: `connect`, `disconnect`, `list_tables`, `get_schema`, `get_rows`, `execute_query`, `get_erd_data`
-3. Register it in `adapters/__init__.py`:
-   ```python
-   from .yourdb import YourDBAdapter
-   ADAPTER_REGISTRY["yourdb"] = YourDBAdapter
-   ```
-4. Add its connection form fields to `templates/connection_form.html`
+1. Create `adapters/yourdb.py` extending `BaseAdapter`.
+2. Implement `connect`, `disconnect`, `list_tables`, `get_schema`,
+   `get_rows`, `execute_query`, `get_erd_data`.
+3. Register it in `adapters/__init__.py`.
+4. Add its form fields to `templates/connection_form.html` AND to the
+   SPA form at `frontend/src/pages/ConnectionFormPage.tsx`.
 
 ---
 

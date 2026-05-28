@@ -3,9 +3,8 @@ env/
 __pycache__/
 .venv/
 
-# SPA build output — produced by `npm run build` in frontend/
-# (TBD per MIGRATION_NOTES: decide whether to commit this or build in Docker)
-static/dist/
+# SPA build output is committed (see README "Setup") so `uv run app.py`
+# works straight after clone with no Node required.
 
 # node
 frontend/node_modules/
