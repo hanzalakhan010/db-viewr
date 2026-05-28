@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content_class %} erd-content{% endblock %}
+{% block tab_type %}erd{% endblock %}
+{% block tab_label %}ERD{% endblock %}
+
+{% block content %}
+
+{# ── Toolbar ── #}
+<div class="erd-toolbar">
+  <div class="breadcrumb" style="margin:0">
+    <a href="{{ url_for('list_tables', conn_id=conn.id) }}">{{ conn.name }}</a>
+    <span class="sep">/</span>
+    <span>ERD</span>
+  </div>
+
+  <div class="erd-tools">
+    <button id="erd-zi"  title="Zoom in">+</button>
+    <button id="erd-zo"  title="Zoom out">−</button>
+    <button id="erd-zr"  title="Reset zoom">1:1</button>
+    <button id="erd-fit" title="Fit all tables into view">Fit</button>
+  </div>
+
+  <div class="erd-legend">
+    <span class="legend-item"><span class="legend-pk">★</span> Primary key</span>
+    <span class="legend-item"><span class="legend-fk">◈</span> Foreign key</span>
+    {% if erd_data.has_relations %}
+      <span class="legend-item"><svg width="32" height="12" style="vertical-align:middle">
+        <line x1="0" y1="6" x2="26" y2="6" stroke="#7c6af7" stroke-width="1.5"/>
+        <polygon points="22,2 32,6 22,10" fill="#7c6af7"/>
+      </svg> Relation</span>
+    {% endif %}
+  </div>
+
+  <span class="erd-info">
+    {{ erd_data.tables | length }} table{{ 's' if erd_data.tables | length != 1 }}
+    {% if rel_count %}· {{ rel_count }} relation{{ 's' if rel_count != 1 }}{% endif %}
+    {% if not erd_data.has_relations and erd_data.tables %}
+      · <span class="muted">(no FK relations detected)</span>
+    {% endif %}
+  </span>
+</div>
+
+{# ── Error banner ── #}
+{% if error %}
+  <div class="alert alert-error" style="margin:12px 16px 0">
+    <strong>Error loading ERD:</strong> {{ error }}
+  </div>
+{% endif %}
+
+{# ── SVG canvas ── #}
+{% if erd_data.tables %}
+  <svg id="erd-svg" xmlns="http://www.w3.org/2000/svg">
+    <g id="erd-vp"></g>
+  </svg>
+{% else %}
+  <div style="padding:40px;color:var(--muted)">No tables found for this connection.</div>
+{% endif %}
+
+{# ── ERD data for JS ── #}
+<script type="application/json" id="erd-data">{{ erd_data | tojson }}</script>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='erd.js') }}"></script>
+{% endblock %}

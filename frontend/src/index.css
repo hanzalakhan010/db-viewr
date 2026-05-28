@@ -1,0 +1,44 @@
+@import 'tailwindcss';
+
+/* Palette ported from static/style.css so the SPA matches current look. */
+@theme {
+  --color-topbar: #232f3e;
+  --color-topbar-text: #ffffff;
+  --color-sidebar: #2d3748;
+  --color-sidebar-text: #cbd5e0;
+  --color-sidebar-hover: #3a4a5c;
+  --color-sidebar-active: #4a5568;
+  --color-bg: #f0f2f5;
+  --color-surface: #ffffff;
+  --color-border: #d5dbdb;
+  --color-border-light: #eaeded;
+  --color-text: #16191f;
+  --color-text-secondary: #545b64;
+  --color-muted: #687078;
+  --color-accent: #ec7211;
+  --color-accent-hover: #eb5f07;
+  --color-info: #0073bb;
+  --color-info-hover: #005a8e;
+  --color-success: #1d8102;
+  --color-danger: #d13212;
+
+  --font-sans: 'Amazon Ember', 'Helvetica Neue', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', monospace;
+
+  --radius-DEFAULT: 4px;
+  --radius-lg: 8px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.5;
+}

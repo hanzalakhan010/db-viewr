@@ -1,0 +1,57 @@
+services:
+  db-viewr:
+    build: .
+    # ── or pull from registry once published: ─────────────────────────────
+    # image: ghcr.io/your-org/db-viewr:latest
+    # ──────────────────────────────────────────────────────────────────────
+    container_name: db-viewr
+    ports:
+      - "5000:5000"
+    environment:
+      # Path inside the container where connections are stored.
+      # The named volume below is mounted here, so data survives restarts.
+      CONNECTIONS_FILE: /data/connections.json
+
+      # Set a stable secret key so flash messages survive container restarts.
+      # Change this value before exposing the container to a network.
+      SECRET_KEY: "change-me-to-a-random-secret"
+
+      # ── AWS credentials for DynamoDB (optional) ────────────────────────
+      # You can also set these per-connection in the UI instead.
+      # AWS_ACCESS_KEY_ID:     ""
+      # AWS_SECRET_ACCESS_KEY: ""
+      # AWS_DEFAULT_REGION:    "us-east-1"
+
+    volumes:
+      # Named volume: persists saved connections across container restarts/upgrades.
+      - connections_data:/data
+
+      # ── SQLite users ───────────────────────────────────────────────────
+      # Mount the host directory that contains your .db files so the container
+      # can read them.  Then set the path in the UI to e.g. /sqlite/mydb.db
+      #
+      # - /home/yourname/databases:/sqlite:ro
+      # ──────────────────────────────────────────────────────────────────
+
+    restart: unless-stopped
+
+    # Optional: keep db-viewr on the same Docker network as your other
+    # containers so you can reach them by service name instead of IP.
+    #
+    # networks:
+    #   - myapp_network
+
+# ── Volumes ─────────────────────────────────────────────────────────────────
+volumes:
+  connections_data:
+    # Data stored in a managed Docker volume at:
+    #   Linux/Mac:  /var/lib/docker/volumes/db-viewr_connections_data/_data/
+    #   Windows:    \\wsl$\docker-desktop-data\…
+    #
+    # To back up:  docker cp db-viewr:/data/connections.json ./connections.json
+    # To restore:  docker cp ./connections.json db-viewr:/data/connections.json
+
+# ── Networks ─────────────────────────────────────────────────────────────────
+# networks:
+#   myapp_network:
+#     external: true

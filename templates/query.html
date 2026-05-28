@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block tab_type %}query{% endblock %}
+{% block tab_label %}Query{% endblock %}
+{% block content %}
+
+<div class="breadcrumb">
+  <a href="{{ url_for('index') }}">Connections</a>
+  <span class="sep">/</span>
+  <a href="{{ url_for('list_tables', conn_id=conn.id) }}">{{ conn.name }}</a>
+  <span class="sep">/</span>
+  <span>Query Editor</span>
+</div>
+
+<div class="page-header">
+  <h1>Query Editor</h1>
+  <span class="db-badge db-{{ db_type }}">{{ db_type }}</span>
+</div>
+
+<div class="query-hint">
+  {% if db_type in ('postgresql', 'mysql', 'sqlite') %}
+    <p>Enter standard SQL. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run.</p>
+    <p class="muted">SELECT results are shown below. INSERT / UPDATE / DELETE show affected row count.</p>
+  {% elif db_type == 'mongodb' %}
+    <p>Enter a JSON find filter or aggregate pipeline. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run.</p>
+    <ul class="muted">
+      <li>Find: <code>{"field": "value"}</code></li>
+      <li>Aggregate: <code>[{"$match": {"status": "active"}}, {"$group": {"_id": "$type"}}]</code></li>
+      <li>Target collection: add <code>"__collection__": "collname"</code> as first key in a dict</li>
+    </ul>
+  {% elif db_type == 'dynamodb' %}
+    <p>Enter a PartiQL statement. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run.</p>
+    <p class="muted">Example: <code>SELECT * FROM "my-table" WHERE pk = 'abc'</code></p>
+  {% endif %}
+</div>
+
+<div class="query-layout" data-conn-id="{{ conn.id }}">
+  <form method="post" id="query-form" class="query-main">
+    <textarea name="query" id="query-textarea" rows="10" spellcheck="false"
+              data-cm-mode="{% if db_type in ('postgresql', 'mysql', 'sqlite', 'dynamodb') %}text/x-sql{% else %}application/json{% endif %}">{{ query }}</textarea>
+    <div class="query-actions">
+      <button type="submit" class="btn-primary">Run Query <kbd>Ctrl</kbd>+<kbd>↵</kbd></button>
+      <a href="{{ url_for('list_tables', conn_id=conn.id) }}">Back to tables</a>
+      {% if elapsed_ms is not none %}
+        <span class="muted query-elapsed">query {{ elapsed_ms }} ms</span>
+      {% endif %}
+    </div>
+  </form>
+
+  <aside class="query-history" id="query-history">
+    <div class="query-history-header">
+      <h3>History</h3>
+      {% if history %}
+        <form method="post"
+              action="{{ url_for('clear_query_history', conn_id=conn.id) }}"
+              onsubmit="return confirm('Clear query history for this connection?');"
+              style="margin:0">
+          <button type="submit" class="btn-link" title="Clear history for this connection">Clear</button>
+        </form>
+      {% endif %}
+    </div>
+
+    {% if history %}
+      <ul class="query-history-list" id="query-history-list">
+        {% for item in history %}
+          <li class="query-history-item"
+              data-query="{{ item.q }}"
+              title="Click to load into editor">
+            <pre class="query-history-preview">{{ item.q }}</pre>
+            <div class="query-history-meta">
+              <span class="query-history-time" data-ts="{{ item.t }}">{{ item.t }}</span>
+              <form method="post"
+                    action="{{ url_for('delete_query_history_item', conn_id=conn.id) }}"
+                    class="query-history-delete-form"
+                    onclick="event.stopPropagation();">
+                <input type="hidden" name="index" value="{{ loop.index0 }}">
+                <button type="submit" class="btn-link query-history-delete"
+                        title="Delete this entry">×</button>
+              </form>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="query-history-empty muted">No queries yet.</p>
+    {% endif %}
+  </aside>
+</div>
+
+{% if result is not none %}
+  <div class="query-results">
+    {% if result.error %}
+      <div class="alert alert-error"><strong>Error:</strong> {{ result.error }}</div>
+
+    {% elif result.affected is not none %}
+      <div class="alert alert-success">
+        Query OK — {{ result.affected }} row{{ 's' if result.affected != 1 }} affected.
+      </div>
+
+    {% elif result.columns %}
+      <p class="muted">{{ result.rows | length }} row{{ 's' if result.rows | length != 1 }} returned.</p>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>{% for c in result.columns %}<th>{{ c }}</th>{% endfor %}</tr>
+          </thead>
+          <tbody>
+            {% for row in result.rows %}
+              <tr>
+                {% for cell in row %}
+                  <td title="{{ cell }}">
+                    {%- if cell | string | length > 80 -%}
+                      {{ cell | string | truncate(80) }}
+                    {%- else -%}
+                      {{ cell }}
+                    {%- endif -%}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+    {% else %}
+      <p class="empty-state">Query returned no rows.</p>
+    {% endif %}
+  </div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.css">
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/sql/sql.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/javascript/javascript.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/edit/matchbrackets.js"></script>
+<script>
+  (function () {
+    var ta = document.getElementById("query-textarea");
+    if (!ta || typeof CodeMirror === "undefined") return;
+    var mode = ta.dataset.cmMode || "text/x-sql";
+    var cm = CodeMirror.fromTextArea(ta, {
+      mode: mode,
+      lineNumbers: true,
+      matchBrackets: true,
+      indentUnit: 2,
+      tabSize: 2,
+      lineWrapping: true,
+      extraKeys: {
+        "Ctrl-Enter": function () {
+          cm.save();
+          document.getElementById("query-form").submit();
+        },
+      },
+    });
+    cm.on("change", function () { cm.save(); });
+    cm.setSize(null, 260);
+  })();
+</script>
+{% endblock %}

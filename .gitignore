@@ -1,0 +1,15 @@
+.claude/
+env/
+__pycache__/
+.venv/
+
+# SPA build output — produced by `npm run build` in frontend/
+# (TBD per MIGRATION_NOTES: decide whether to commit this or build in Docker)
+static/dist/
+
+# node
+frontend/node_modules/
+
+# Local data with credentials and query history — NEVER commit
+connections.json
+query_history.json

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block tab_type %}root{% endblock %}
+{% block tab_label %}Tables{% endblock %}
+{% block tab_pinned %}1{% endblock %}
+{% block content %}
+
+<div class="breadcrumb">
+  <a href="{{ url_for('index') }}">Connections</a>
+  <span class="sep">/</span>
+  <span>{{ conn.name }}</span>
+</div>
+
+<div class="page-header">
+  <h1>
+    <span class="db-badge db-{{ conn.db_type }}">{{ conn.db_type }}</span>
+    {{ conn.name }}
+  </h1>
+  <a href="{{ url_for('query_editor', conn_id=conn.id) }}" class="btn-primary">
+    Open Query Editor
+  </a>
+  {% if conn.db_type in ('postgresql', 'mysql', 'sqlite', 'mongodb', 'dynamodb') %}
+  <a href="{{ url_for('erd_view', conn_id=conn.id) }}" class="btn-sm">
+    View ERD
+  </a>
+  {% endif %}
+</div>
+
+{% if tables %}
+  <p class="muted">{{ tables | length }} table{{ 's' if tables | length != 1 }}</p>
+  <ul class="table-list">
+    {% for t in tables %}
+      <li>
+        <a href="{{ url_for('view_table', conn_id=conn.id, table=t) }}">{{ t }}</a>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty-state">No tables found.</p>
+{% endif %}
+
+{% endblock %}
