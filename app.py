@@ -17,6 +17,7 @@ from flask import (
 )
 
 from adapters import get_adapter
+from storage import connection_public, load_connections, save_connections
 
 app = Flask(__name__)
 
@@ -45,10 +46,6 @@ def spa(rest: str = ""):
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 
 # Allow overriding via env var so Docker can mount a persistent data volume
-CONNECTIONS_FILE = os.environ.get(
-    "CONNECTIONS_FILE",
-    os.path.join(os.path.dirname(__file__), "connections.json"),
-)
 QUERY_HISTORY_FILE = os.environ.get(
     "QUERY_HISTORY_FILE",
     os.path.join(os.path.dirname(__file__), "query_history.json"),
@@ -57,18 +54,7 @@ QUERY_HISTORY_FILE = os.environ.get(
 SQL_DB_TYPES = {"postgresql", "mysql", "sqlite"}
 
 # ── Connection persistence ─────────────────────────────────────────────────────
-
-def load_connections() -> dict:
-    if not os.path.exists(CONNECTIONS_FILE):
-        return {}
-    with open(CONNECTIONS_FILE) as f:
-        return json.load(f)
-
-
-def save_connections(conns: dict) -> None:
-    with open(CONNECTIONS_FILE, "w") as f:
-        json.dump(conns, f, indent=2)
-
+# load_connections / save_connections live in storage.py (shared with mcp_server.py)
 
 def get_conn_or_404(conn_id: str) -> dict:
     conns = load_connections()
@@ -555,15 +541,7 @@ _FIELDS_BY_TYPE = {
 
 
 def _connection_public(conn: dict) -> dict:
-    out = {}
-    for k, v in conn.items():
-        if k in _SECRET_FIELDS:
-            continue
-        out[k] = v
-    out["id"] = conn.get("id")
-    for sf in _SECRET_FIELDS:
-        out[f"has_{sf}"] = bool(conn.get(sf))
-    return out
+    return connection_public(conn, _SECRET_FIELDS)
 
 
 def _build_connection_from_input(payload: dict, conn_id: str, existing: dict | None = None) -> tuple[dict | None, str | None]:

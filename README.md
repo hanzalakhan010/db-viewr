@@ -65,6 +65,81 @@ Open **http://localhost:5001** — both UIs are live:
 Saved connections live in `connections.json` next to `app.py`
 (gitignored, never committed). Query history lives in `query_history.json`.
 
+### MCP server (query your DBs from an LLM)
+
+The repo includes an MCP (Model Context Protocol) server, `mcp_server.py`,
+that exposes your saved connections as tools an LLM client can call — a
+tunnel for the model to query your databases instead of you running psql.
+It speaks stdio, reads the same `connections.json`, and does **not** need
+the Flask app to be running.
+
+Tools exposed:
+
+- `list_connections` — saved connections (secrets redacted)
+- `test_connection` — connectivity check
+- `list_tables` — tables / collections on a connection
+- `get_table_schema` — column definitions for one table
+- `get_table_rows` — paginated row browsing, no query language needed
+- `run_query` — SQL / Mongo JSON / PartiQL depending on `db_type`
+- `get_erd` — full schema graph with foreign-key relations
+
+#### Setup
+
+1. **Install deps** (the `mcp` package is already in `pyproject.toml`):
+   ```bash
+   uv sync
+   ```
+2. **Save at least one connection** — run `uv run app.py`, open
+   <http://localhost:5001>, and add a connection. The MCP server reads the
+   same `connections.json` the web UI writes.
+3. **Connect an LLM client:**
+   - **Claude Code** — already wired up via the committed `.mcp.json`.
+     Open this repo in Claude Code and approve the `db-viewr` server when
+     prompted.
+   - **Claude Desktop** — add to `claude_desktop_config.json` (absolute
+     path required since Desktop launches servers from an arbitrary
+     directory), then restart Desktop:
+     ```json
+     {
+       "mcpServers": {
+         "db-viewr": {
+           "command": "uv",
+           "args": ["--directory", "/absolute/path/to/db-viewr", "run", "mcp_server.py"]
+         }
+       }
+     }
+     ```
+
+#### Verify it works
+
+Run through this checklist after setup:
+
+- [ ] **Server boots:** `uv run mcp_server.py` starts silently and blocks
+      waiting on stdin (Ctrl-C to exit). Any traceback = broken install.
+- [ ] **Tools respond:** `uv run mcp dev mcp_server.py` opens the MCP
+      Inspector (needs Node). Call `list_connections` — your connections
+      appear with **no** `password` / `uri` / `secret_access_key` fields,
+      only `has_*` booleans.
+- [ ] **Queries run:** in the Inspector, call `run_query` with a
+      connection id and `SELECT 1` (SQL DBs) — expect one row back with
+      `error: null` and an `elapsed_ms` timing.
+- [ ] **Errors are clean:** call `run_query` with a bogus `connection_id`
+      → "Unknown connection id" message; with invalid SQL → the DB's
+      syntax error in the `error` field. Neither should crash the server.
+- [ ] **Truncation guards context:** `run_query` with `SELECT *` on a big
+      table and `max_rows: 5` → 5 rows returned, `truncated: true`,
+      `row_count` shows the real total.
+- [ ] **Claude Code end-to-end:** `/mcp` shows `db-viewr` connected; ask
+      *"list my database connections and show 5 rows from some table"* —
+      each tool call should surface an approval prompt before running.
+- [ ] **Web UI unaffected:** `uv run app.py` still lists/edits
+      connections normally at <http://localhost:5001>.
+
+> **Security note:** `run_query` has **full read/write access** — the LLM
+> can run INSERT/UPDATE/DELETE/DDL on any saved connection. The only guard
+> is your MCP client's per-call approval prompt, so review each tool call
+> before approving it.
+
 ### (Optional) Rebuild the SPA
 
 The repo ships with a pre-built bundle at `static/dist/`. Rebuild only if

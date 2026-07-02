@@ -35,6 +35,7 @@ COPY adapters/ ./adapters/
 COPY templates/ ./templates/
 COPY static/    ./static/
 COPY app.py     .
+COPY storage.py .
 
 # Create data directory for connections.json persistence
 # (can be overridden by mounting a volume at /data)
