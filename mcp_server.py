@@ -42,6 +42,9 @@ def _json_cell(value: Any) -> Any:
         if isinstance(value, str) and len(value) > MAX_CELL_CHARS:
             return value[:MAX_CELL_CHARS] + "... [truncated]"
         return value
+    if isinstance(value, (memoryview, bytearray)):
+        # str(memoryview) is a memory address, not the payload
+        value = bytes(value)
     text = str(value)
     if len(text) > MAX_CELL_CHARS:
         return text[:MAX_CELL_CHARS] + "... [truncated]"
@@ -52,8 +55,18 @@ def _json_rows(rows: list) -> list:
     return [[_json_cell(cell) for cell in row] for row in rows]
 
 
+def _load_connections() -> tuple[dict | None, str | None]:
+    """load_connections that reports a corrupt/unreadable file as an error value."""
+    try:
+        return load_connections(), None
+    except Exception as e:
+        return None, f"Could not read the connections file: {e}"
+
+
 def _with_adapter(connection_id: str, fn: Callable[[BaseAdapter, dict], dict]) -> dict:
-    conns = load_connections()
+    conns, err = _load_connections()
+    if err:
+        return {"error": err}
     if connection_id not in conns:
         return {
             "error": f"Unknown connection id {connection_id!r}. "
@@ -80,7 +93,9 @@ def list_connections() -> dict:
     dialect run_query expects. Secrets (passwords, URIs, access keys) are
     redacted.
     """
-    conns = load_connections()
+    conns, err = _load_connections()
+    if err:
+        return {"error": err}
     return {
         "connections": [connection_public(c, SECRET_FIELDS) for c in conns.values()]
     }
@@ -89,7 +104,9 @@ def list_connections() -> dict:
 @mcp.tool()
 def test_connection(connection_id: str) -> dict:
     """Check that a connection can be established. Returns {ok, error}."""
-    conns = load_connections()
+    conns, err = _load_connections()
+    if err:
+        return {"ok": False, "error": err}
     if connection_id not in conns:
         return {
             "ok": False,
