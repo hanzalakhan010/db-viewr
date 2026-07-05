@@ -1,8 +1,14 @@
 import json
+import threading
+
 from pymongo import MongoClient
 from bson import ObjectId
 from bson.errors import InvalidId
 from .base import BaseAdapter
+
+# Shared MongoClient per URI — see MongoAdapter.connect()
+_CLIENTS: dict[str, MongoClient] = {}
+_CLIENTS_LOCK = threading.Lock()
 
 _PYTHON_TYPE_MAP = {
     "str": "String",
@@ -20,16 +26,28 @@ _PYTHON_TYPE_MAP = {
 class MongoAdapter(BaseAdapter):
 
     def connect(self):
-        self._client = MongoClient(self.config["uri"], serverSelectionTimeoutMS=5000)
-        # Trigger actual connection to catch errors early
-        self._client.admin.command("ping")
-        self._db = self._client[self.config["database"]]
+        # MongoClient maintains its own socket pool and is thread-safe —
+        # cache one per URI instead of paying connection setup per request.
+        uri = self.config["uri"]
+        with _CLIENTS_LOCK:
+            client = _CLIENTS.get(uri)
+            if client is None:
+                client = MongoClient(
+                    uri,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=5000,
+                )
+                _CLIENTS[uri] = client
+        # Ping every time so connect() stays a real connectivity check
+        # (over an already-open pooled socket this is a single fast round trip)
+        client.admin.command("ping")
+        self._client = client
+        self._db = client[self.config["database"]]
 
     def disconnect(self):
-        if self._client:
-            self._client.close()
-            self._client = None
-            self._db = None
+        # The client is shared and pooled — just drop our references
+        self._client = None
+        self._db = None
 
     def list_tables(self) -> list[str]:
         return sorted(self._db.list_collection_names())

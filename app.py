@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 import uuid
 from urllib.parse import urlencode
@@ -95,6 +96,35 @@ def append_history(conn_id: str, query: str) -> None:
     save_query_history(history)
 
 
+# ── Schema cache ────────────────────────────────────────────────────────────────
+# Table schemas rarely change but were re-introspected on every page/sort/filter
+# request — an information_schema join per click on remote DBs. Cache briefly.
+
+SCHEMA_CACHE_TTL = 60.0
+_schema_cache: dict[tuple[str, str], tuple[float, list]] = {}
+_schema_cache_lock = threading.Lock()
+
+
+def get_schema_cached(conn_id: str, adapter, table: str) -> list[dict]:
+    key = (conn_id, table)
+    with _schema_cache_lock:
+        hit = _schema_cache.get(key)
+        if hit and (time.monotonic() - hit[0]) < SCHEMA_CACHE_TTL:
+            return hit[1]
+    schema = adapter.get_schema(table)
+    with _schema_cache_lock:
+        _schema_cache[key] = (time.monotonic(), schema)
+    return schema
+
+
+def invalidate_schema_cache(conn_id: str) -> None:
+    """Drop cached schemas for a connection (after DDL-capable queries or
+    connection edits)."""
+    with _schema_cache_lock:
+        for key in [k for k in _schema_cache if k[0] == conn_id]:
+            del _schema_cache[key]
+
+
 # ── Context processor: inject connections into every template ──────────────────
 
 @app.context_processor
@@ -141,6 +171,7 @@ def edit_connection(conn_id):
         conns = load_connections()
         conns[conn_id] = data
         save_connections(conns)
+        invalidate_schema_cache(conn_id)
         flash("Connection updated.", "success")
         return redirect(url_for("index"))
     return render_template("connection_form.html", conn=conn, title="Edit Connection")
@@ -153,6 +184,7 @@ def delete_connection(conn_id):
     conns = load_connections()
     conns.pop(conn_id, None)
     save_connections(conns)
+    invalidate_schema_cache(conn_id)
     flash("Connection deleted.", "info")
     return redirect(url_for("index"))
 
@@ -215,12 +247,12 @@ def view_table(conn_id, table):
     sort = None  # parsed after schema is loaded so we can validate the column
 
     try:
+        start = time.monotonic()
         adapter = get_adapter(conn)
         adapter.connect()
         try:
-            schema = adapter.get_schema(table)
+            schema = get_schema_cached(conn_id, adapter, table)
             sort = _parse_sort(request.args, schema)
-            start = time.monotonic()
             data = adapter.get_rows(table, page, page_size, filters, sort)
             elapsed_ms = int((time.monotonic() - start) * 1000)
         finally:
@@ -262,7 +294,7 @@ def export_table_csv(conn_id, table):
         adapter = get_adapter(conn)
         adapter.connect()
         try:
-            schema = adapter.get_schema(table)
+            schema = get_schema_cached(conn_id, adapter, table)
             sort = _parse_sort(request.args, schema)
 
             rows_acc: list = []
@@ -408,14 +440,15 @@ def query_editor(conn_id):
     if request.method == "POST" and query.strip():
         append_history(conn_id, query)
         try:
+            start = time.monotonic()
             adapter = get_adapter(conn)
             adapter.connect()
             try:
-                start = time.monotonic()
                 result = adapter.execute_query(query)
                 elapsed_ms = int((time.monotonic() - start) * 1000)
             finally:
                 adapter.disconnect()
+            invalidate_schema_cache(conn_id)  # query may have been DDL
         except Exception as e:
             result = {"columns": [], "rows": [], "affected": None, "error": str(e)}
 
@@ -607,6 +640,7 @@ def api_update_connection(conn_id):
         return jsonify({"error": err}), 400
     conns[conn_id] = data
     save_connections(conns)
+    invalidate_schema_cache(conn_id)
     return jsonify({"connection": _connection_public(data)})
 
 
@@ -617,6 +651,7 @@ def api_delete_connection(conn_id):
         return jsonify({"error": "Connection not found"}), 404
     conns.pop(conn_id, None)
     save_connections(conns)
+    invalidate_schema_cache(conn_id)
     return ("", 204)
 
 
@@ -672,14 +707,16 @@ def api_view_table(conn_id, table):
     filters = _parse_filters(request.args, db_type)
 
     try:
+        t0 = time.monotonic()
         adapter = get_adapter(conn)
         adapter.connect()
+        t_connected = time.monotonic()
         try:
-            schema = adapter.get_schema(table)
+            schema = get_schema_cached(conn_id, adapter, table)
+            t_schema = time.monotonic()
             sort = _parse_sort(request.args, schema)
-            start = time.monotonic()
             data = adapter.get_rows(table, page, page_size, filters, sort)
-            elapsed_ms = int((time.monotonic() - start) * 1000)
+            t_rows = time.monotonic()
         finally:
             adapter.disconnect()
     except Exception as e:
@@ -688,7 +725,14 @@ def api_view_table(conn_id, table):
     return jsonify({
         "schema": schema,
         "data": data,
-        "elapsed_ms": elapsed_ms,
+        # Full request cost, not just the rows query — connect + schema
+        # dominate on remote DBs and used to be hidden from this number
+        "elapsed_ms": int((t_rows - t0) * 1000),
+        "timings": {
+            "connect_ms": int((t_connected - t0) * 1000),
+            "schema_ms": int((t_schema - t_connected) * 1000),
+            "rows_ms": int((t_rows - t_schema) * 1000),
+        },
         "db_type": db_type,
     })
 
@@ -773,14 +817,15 @@ def api_run_query(conn_id):
     append_history(conn_id, query)
     conn = conns[conn_id]
     try:
+        start = time.monotonic()
         adapter = get_adapter(conn)
         adapter.connect()
         try:
-            start = time.monotonic()
             result = adapter.execute_query(query)
             elapsed_ms = int((time.monotonic() - start) * 1000)
         finally:
             adapter.disconnect()
+        invalidate_schema_cache(conn_id)  # query may have been DDL
     except Exception as e:
         return jsonify({
             "columns": [],
