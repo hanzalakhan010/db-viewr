@@ -31,16 +31,30 @@ class MongoAdapter(BaseAdapter):
         uri = self.config["uri"]
         with _CLIENTS_LOCK:
             client = _CLIENTS.get(uri)
-            if client is None:
-                client = MongoClient(
-                    uri,
-                    serverSelectionTimeoutMS=5000,
-                    connectTimeoutMS=5000,
-                )
-                _CLIENTS[uri] = client
+        created = client is None
+        if created:
+            client = MongoClient(
+                uri,
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=5000,
+            )
         # Ping every time so connect() stays a real connectivity check
         # (over an already-open pooled socket this is a single fast round trip)
-        client.admin.command("ping")
+        try:
+            client.admin.command("ping")
+        except Exception:
+            if created:
+                client.close()  # never cache a client that has not connected
+            raise
+        if created:
+            with _CLIENTS_LOCK:
+                other = _CLIENTS.get(uri)
+                if other is None:
+                    _CLIENTS[uri] = client
+                else:
+                    # Another thread cached one first — use theirs
+                    client.close()
+                    client = other
         self._client = client
         self._db = client[self.config["database"]]
 

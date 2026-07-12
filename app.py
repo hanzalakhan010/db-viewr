@@ -112,8 +112,12 @@ def get_schema_cached(conn_id: str, adapter, table: str) -> list[dict]:
         if hit and (time.monotonic() - hit[0]) < SCHEMA_CACHE_TTL:
             return hit[1]
     schema = adapter.get_schema(table)
+    now = time.monotonic()
     with _schema_cache_lock:
-        _schema_cache[key] = (time.monotonic(), schema)
+        # Prune expired entries so the cache can't grow unbounded
+        for k in [k for k, (ts, _) in _schema_cache.items() if now - ts >= SCHEMA_CACHE_TTL]:
+            del _schema_cache[k]
+        _schema_cache[key] = (now, schema)
     return schema
 
 

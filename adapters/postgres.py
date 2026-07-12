@@ -130,9 +130,12 @@ class PostgresAdapter(BaseAdapter):
                 if est is None or est[0] is None or est[0] < 0:
                     cur.execute(f'SELECT COUNT(*) FROM "{table}"')
                     total = cur.fetchone()[0]
-                else:
+                elif rows:
                     # Estimates lag reality; never contradict what we fetched
                     total = max(int(est[0]), offset + len(rows) + (1 if has_next else 0))
+                else:
+                    # Empty page ⇒ the table ends at or before this offset
+                    total = min(int(est[0]), offset)
 
         return {
             "columns": columns,
