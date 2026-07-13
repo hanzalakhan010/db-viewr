@@ -57,7 +57,8 @@ export function ConnectionFormPage({ mode }: { mode: Mode }) {
   const [submitError, setSubmitError] = useState<string | null>(null)
 
   const existing = useQuery({
-    queryKey: ['connections', connId],
+    // Same key as AppLayout/useConnection so the layout's cached copy is reused
+    queryKey: ['connection', connId],
     queryFn: () => apiFetch<ConnectionResponse>(`connections/${connId}`),
     enabled: mode === 'edit' && !!connId,
   })
@@ -81,6 +82,8 @@ export function ConnectionFormPage({ mode }: { mode: Mode }) {
           }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['connections'] })
+      // Singular key used by the layout header + this form's edit mode
+      qc.invalidateQueries({ queryKey: ['connection', connId] })
       navigate('/')
     },
     onError: (e: unknown) => {

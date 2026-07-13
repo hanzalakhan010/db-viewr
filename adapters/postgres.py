@@ -2,23 +2,54 @@ import psycopg2
 import psycopg2.extras
 from .base import BaseAdapter
 from .filters import build_where
+from .pool import POOL
 
 
 class PostgresAdapter(BaseAdapter):
 
-    def connect(self):
-        self._conn = psycopg2.connect(
+    def _pool_key(self):
+        c = self.config
+        return ("postgresql", c.get("host"), str(c.get("port", 5432)),
+                c.get("database"), c.get("user"), c.get("password"))
+
+    def _open_connection(self):
+        conn = psycopg2.connect(
             host=self.config["host"],
             port=int(self.config.get("port", 5432)),
             dbname=self.config["database"],
             user=self.config["user"],
             password=self.config["password"],
+            connect_timeout=5,
         )
-        self._conn.autocommit = False
+        conn.autocommit = False
+        return conn
+
+    @staticmethod
+    def _validate(conn):
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            conn.rollback()
+            return True
+        except Exception:
+            return False
+
+    def connect(self):
+        self._conn = POOL.acquire(
+            self._pool_key(),
+            factory=self._open_connection,
+            validate=self._validate,
+            close=lambda c: c.close(),
+        )
 
     def disconnect(self):
         if self._conn:
-            self._conn.close()
+            POOL.release(
+                self._pool_key(),
+                self._conn,
+                reset=lambda c: c.rollback(),
+                close=lambda c: c.close(),
+            )
             self._conn = None
 
     def list_tables(self) -> list[str]:
@@ -74,15 +105,37 @@ class PostgresAdapter(BaseAdapter):
         order_clause = self._build_order(sort)
 
         with self._conn.cursor() as cur:
-            cur.execute(f'SELECT COUNT(*) FROM "{table}" {where_clause}', params)
-            total = cur.fetchone()[0]
-
+            # Fetch one extra row so has_next is exact without needing total
             cur.execute(
                 f'SELECT * FROM "{table}" {where_clause} {order_clause} LIMIT %s OFFSET %s',
-                params + [page_size, offset],
+                params + [page_size + 1, offset],
             )
             columns = [d[0] for d in cur.description] if cur.description else []
             rows = [list(row) for row in cur.fetchall()]
+            has_next = len(rows) > page_size
+            rows = rows[:page_size]
+
+            if where_clause:
+                cur.execute(f'SELECT COUNT(*) FROM "{table}" {where_clause}', params)
+                total = cur.fetchone()[0]
+            else:
+                # Planner estimate instead of a full scan per page view
+                # (pgAdmin does the same). reltuples is -1 until first
+                # ANALYZE — fall back to an exact count then.
+                cur.execute(
+                    "SELECT reltuples::bigint FROM pg_class WHERE oid = to_regclass(%s)",
+                    (f'"{table}"',),
+                )
+                est = cur.fetchone()
+                if est is None or est[0] is None or est[0] < 0:
+                    cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+                    total = cur.fetchone()[0]
+                elif rows:
+                    # Estimates lag reality; never contradict what we fetched
+                    total = max(int(est[0]), offset + len(rows) + (1 if has_next else 0))
+                else:
+                    # Empty page ⇒ the table ends at or before this offset
+                    total = min(int(est[0]), offset)
 
         return {
             "columns": columns,
@@ -90,7 +143,7 @@ class PostgresAdapter(BaseAdapter):
             "total": total,
             "page": page,
             "page_size": page_size,
-            "has_next": (offset + page_size) < total,
+            "has_next": has_next,
         }
 
     def execute_query(self, query_str: str) -> dict:
