@@ -3,10 +3,9 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'node:path'
 
-// Build into ../static/dist so Flask can serve it.
-// Mount under /app/ during the migration.
+// Build into ../static/dist so Flask can serve it at root.
 export default defineConfig({
-  base: '/app/',
+  base: '/',
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

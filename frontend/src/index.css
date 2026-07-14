@@ -1,28 +1,27 @@
 @import 'tailwindcss';
 
-/* Palette ported from static/style.css so the SPA matches current look. */
+/* Defaults match the "Slate" theme in lib/themes.ts — overridden at runtime by applyTheme(). */
 @theme {
-  --color-topbar: #232f3e;
+  --color-topbar: #1c2733;
   --color-topbar-text: #ffffff;
-  --color-sidebar: #2d3748;
-  --color-sidebar-text: #cbd5e0;
-  --color-sidebar-hover: #3a4a5c;
-  --color-sidebar-active: #4a5568;
-  --color-bg: #f0f2f5;
+  --color-sidebar: #26313d;
+  --color-sidebar-text: #aebac6;
+  --color-sidebar-hover: #324152;
+  --color-sidebar-active: #3c4d61;
+  --color-bg: #eef1f4;
   --color-surface: #ffffff;
-  --color-border: #d5dbdb;
-  --color-border-light: #eaeded;
-  --color-text: #16191f;
-  --color-text-secondary: #545b64;
-  --color-muted: #687078;
-  --color-accent: #ec7211;
-  --color-accent-hover: #eb5f07;
-  --color-info: #0073bb;
-  --color-info-hover: #005a8e;
-  --color-success: #1d8102;
-  --color-danger: #d13212;
+  --color-border: #d7dde3;
+  --color-border-light: #e9edf1;
+  --color-text: #161b22;
+  --color-text-secondary: #4b5563;
+  --color-muted: #8a95a1;
+  --color-accent: #2f6fed;
+  --color-accent-hover: #255bc7;
+  --color-info: #2f6fed;
+  --color-success: #1a8a4c;
+  --color-danger: #d1372f;
 
-  --font-sans: 'Amazon Ember', 'Helvetica Neue', 'Segoe UI', system-ui, sans-serif;
+  --font-sans: 'Helvetica Neue', Helvetica, Arial, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', monospace;
 
   --radius-DEFAULT: 4px;

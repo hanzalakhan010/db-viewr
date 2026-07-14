@@ -2,18 +2,13 @@ import json
 import os
 import time
 import uuid
-from urllib.parse import urlencode
 
 from flask import (
     Flask,
     abort,
-    flash,
     jsonify,
-    redirect,
-    render_template,
     request,
     send_from_directory,
-    url_for,
 )
 
 from adapters import get_adapter
@@ -22,27 +17,6 @@ from storage import connection_public, load_connections, save_connections
 app = Flask(__name__)
 
 SPA_DIST_DIR = os.path.join(os.path.dirname(__file__), "static", "dist")
-
-
-@app.route("/app/")
-@app.route("/app/<path:rest>")
-def spa(rest: str = ""):
-    """Serve the React SPA at /app/* during migration.
-
-    Hashed JS/CSS live under /app/assets/* — served as files. Any other path
-    falls back to index.html so client-side routing works on reload.
-    """
-    if rest:
-        candidate = os.path.join(SPA_DIST_DIR, rest)
-        if os.path.isfile(candidate):
-            return send_from_directory(SPA_DIST_DIR, rest)
-    index_path = os.path.join(SPA_DIST_DIR, "index.html")
-    if not os.path.isfile(index_path):
-        return (
-            "SPA not built yet. Run `npm run build` in frontend/.",
-            503,
-        )
-    return send_from_directory(SPA_DIST_DIR, "index.html")
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 
 # Allow overriding via env var so Docker can mount a persistent data volume
@@ -93,156 +67,6 @@ def append_history(conn_id: str, query: str) -> None:
     items.insert(0, {"q": query, "t": int(time.time() * 1000)})
     history[conn_id] = items
     save_query_history(history)
-
-
-# ── Context processor: inject connections into every template ──────────────────
-
-@app.context_processor
-def inject_globals():
-    return {"connections": load_connections()}
-
-
-# ── Index ──────────────────────────────────────────────────────────────────────
-
-@app.route("/")
-def index():
-    return render_template("index.html", title="Connections")
-
-
-# ── New connection ─────────────────────────────────────────────────────────────
-
-@app.route("/connections/new", methods=["GET", "POST"])
-def new_connection():
-    if request.method == "POST":
-        data = request.form.to_dict()
-        conn_id = uuid.uuid4().hex[:8]
-        data["id"] = conn_id
-        conns = load_connections()
-        conns[conn_id] = data
-        save_connections(conns)
-        flash(f"Connection \"{data.get('name', conn_id)}\" saved.", "success")
-        return redirect(url_for("index"))
-    return render_template("connection_form.html", conn=None, title="New Connection")
-
-
-# ── Edit connection ────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/edit", methods=["GET", "POST"])
-def edit_connection(conn_id):
-    conn = get_conn_or_404(conn_id)
-    if request.method == "POST":
-        data = request.form.to_dict()
-        data["id"] = conn_id
-        # Preserve password if left blank (edit form)
-        if not data.get("password") and conn.get("password"):
-            data["password"] = conn["password"]
-        if not data.get("secret_access_key") and conn.get("secret_access_key"):
-            data["secret_access_key"] = conn["secret_access_key"]
-        conns = load_connections()
-        conns[conn_id] = data
-        save_connections(conns)
-        flash("Connection updated.", "success")
-        return redirect(url_for("index"))
-    return render_template("connection_form.html", conn=conn, title="Edit Connection")
-
-
-# ── Delete connection ──────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/delete", methods=["POST"])
-def delete_connection(conn_id):
-    conns = load_connections()
-    conns.pop(conn_id, None)
-    save_connections(conns)
-    flash("Connection deleted.", "info")
-    return redirect(url_for("index"))
-
-
-# ── Test connectivity (JSON) ───────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/test", methods=["POST"])
-def test_connection(conn_id):
-    conn = get_conn_or_404(conn_id)
-    try:
-        adapter = get_adapter(conn)
-        ok, err = adapter.test_connection()
-    except Exception as e:
-        ok, err = False, str(e)
-    return jsonify({"ok": ok, "error": err})
-
-
-# ── Table / collection list ────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/tables")
-def list_tables(conn_id):
-    conn = get_conn_or_404(conn_id)
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            tables = adapter.list_tables()
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        flash(f"Error listing tables: {e}", "error")
-        tables = []
-    return render_template(
-        "tables.html",
-        conn=conn,
-        tables=tables,
-        title=conn.get("name"),
-        active_conn_id=conn_id,
-    )
-
-
-# ── Table / collection data view ───────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/tables/<path:table>")
-def view_table(conn_id, table):
-    conn = get_conn_or_404(conn_id)
-    db_type = conn.get("db_type", "")
-    page = max(1, int(request.args.get("page", 1)))
-    page_size = max(1, min(500, int(request.args.get("page_size", 50))))
-
-    filters = _parse_filters(request.args, db_type)
-    filter_qs = urlencode({k: v for k, v in request.args.items() if k != "page"})
-
-    schema = []
-    data = {"columns": [], "rows": [], "total": None, "page": page,
-            "page_size": page_size, "has_next": False}
-    error = None
-    elapsed_ms = None
-
-    sort = None  # parsed after schema is loaded so we can validate the column
-
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            schema = adapter.get_schema(table)
-            sort = _parse_sort(request.args, schema)
-            start = time.monotonic()
-            data = adapter.get_rows(table, page, page_size, filters, sort)
-            elapsed_ms = int((time.monotonic() - start) * 1000)
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        error = str(e)
-
-    return render_template(
-        "table_view.html",
-        conn=conn,
-        table=table,
-        schema=schema,
-        data=data,
-        filters=filters,
-        filter_qs=filter_qs,
-        sort=sort,
-        elapsed_ms=elapsed_ms,
-        db_type=db_type,
-        error=error,
-        title=f"{table} — {conn.get('name')}",
-        active_conn_id=conn_id,
-    )
 
 
 # ── CSV export ────────────────────────────────────────────────────────────────
@@ -296,168 +120,6 @@ def export_table_csv(conn_id, table):
             "Content-Disposition": f'attachment; filename="{table}.csv"',
         },
     )
-
-
-# ── Update row ────────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/tables/<path:table>/update", methods=["POST"])
-def update_row(conn_id, table):
-    conn = get_conn_or_404(conn_id)
-
-    identity = {k[len("identity_"):]: v
-                for k, v in request.form.items()
-                if k.startswith("identity_")}
-    new_values = {k[len("val_"):]: v
-                  for k, v in request.form.items()
-                  if k.startswith("val_")}
-    for c in request.form.getlist("null_col"):
-        new_values[c] = "__NULL__"
-
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            result = adapter.update_row(table, identity, new_values)
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        result = {"ok": False, "error": str(e)}
-
-    if result.get("ok"):
-        flash("Row updated.", "success")
-    else:
-        flash(f"Update failed: {result.get('error')}", "error")
-    return redirect(url_for("view_table", conn_id=conn_id, table=table))
-
-
-# ── Insert row ────────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/tables/<path:table>/insert", methods=["POST"])
-def insert_row(conn_id, table):
-    conn = get_conn_or_404(conn_id)
-    db_type = conn.get("db_type", "")
-
-    if db_type in SQL_DB_TYPES:
-        values = {k[4:]: v for k, v in request.form.items() if k.startswith("col_")}
-        null_cols = request.form.getlist("null_col")
-        for c in null_cols:
-            values[c] = "__NULL__"
-    else:
-        values = {"__document__": request.form.get("document", "")}
-
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            result = adapter.insert_row(table, values)
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        result = {"ok": False, "error": str(e)}
-
-    if result.get("ok"):
-        flash("Row inserted.", "success")
-    else:
-        flash(f"Insert failed: {result.get('error')}", "error")
-    return redirect(url_for("view_table", conn_id=conn_id, table=table))
-
-
-# ── ERD viewer ────────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/erd")
-def erd_view(conn_id):
-    conn = get_conn_or_404(conn_id)
-    erd_data = {"tables": {}, "has_relations": False}
-    error = None
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            erd_data = adapter.get_erd_data()
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        error = str(e)
-
-    rel_count = sum(
-        len(t.get("foreign_keys", []))
-        for t in erd_data["tables"].values()
-    )
-
-    return render_template(
-        "erd.html",
-        conn=conn,
-        erd_data=erd_data,
-        rel_count=rel_count,
-        error=error,
-        title=f"ERD — {conn.get('name')}",
-        active_conn_id=conn_id,
-    )
-
-
-# ── Query editor ───────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/query", methods=["GET", "POST"])
-def query_editor(conn_id):
-    conn = get_conn_or_404(conn_id)
-    db_type = conn.get("db_type", "")
-    result = None
-    query = request.form.get("query", "") if request.method == "POST" else ""
-
-    elapsed_ms = None
-    if request.method == "POST" and query.strip():
-        append_history(conn_id, query)
-        try:
-            adapter = get_adapter(conn)
-            adapter.connect()
-            try:
-                start = time.monotonic()
-                result = adapter.execute_query(query)
-                elapsed_ms = int((time.monotonic() - start) * 1000)
-            finally:
-                adapter.disconnect()
-        except Exception as e:
-            result = {"columns": [], "rows": [], "affected": None, "error": str(e)}
-
-    return render_template(
-        "query.html",
-        conn=conn,
-        db_type=db_type,
-        query=query,
-        result=result,
-        elapsed_ms=elapsed_ms,
-        history=get_history_for(conn_id),
-        title=f"Query — {conn.get('name')}",
-        active_conn_id=conn_id,
-    )
-
-
-# ── Query history: delete one / clear all ──────────────────────────────────────
-
-@app.route("/connections/<conn_id>/query/history/delete", methods=["POST"])
-def delete_query_history_item(conn_id):
-    get_conn_or_404(conn_id)
-    try:
-        index = int(request.form.get("index", "-1"))
-    except ValueError:
-        index = -1
-    history = load_query_history()
-    items = history.get(conn_id, [])
-    if 0 <= index < len(items):
-        items.pop(index)
-        history[conn_id] = items
-        save_query_history(history)
-    return redirect(url_for("query_editor", conn_id=conn_id))
-
-
-@app.route("/connections/<conn_id>/query/history/clear", methods=["POST"])
-def clear_query_history(conn_id):
-    get_conn_or_404(conn_id)
-    history = load_query_history()
-    if conn_id in history:
-        history.pop(conn_id)
-        save_query_history(history)
-    return redirect(url_for("query_editor", conn_id=conn_id))
 
 
 # ── Filter parsing ─────────────────────────────────────────────────────────────
@@ -518,12 +180,12 @@ def _parse_filters(args, db_type: str):
 
 @app.errorhandler(404)
 def not_found(e):
-    return render_template("error.html", code=404, message="Page not found."), 404
+    return jsonify({"error": "Not found"}), 404
 
 
 @app.errorhandler(500)
 def server_error(e):
-    return render_template("error.html", code=500, message=str(e)), 500
+    return jsonify({"error": str(e)}), 500
 
 
 # ── JSON API (SPA) ────────────────────────────────────────────────────────────
@@ -857,6 +519,37 @@ def api_get_erd(conn_id):
         for t in erd_data["tables"].values()
     )
     return jsonify({"erd": erd_data, "rel_count": rel_count}), 200
+
+
+# ── React SPA (catch-all) ──────────────────────────────────────────────────────
+# Registered last so /api/* and /connections/.../export.csv keep matching first.
+
+
+@app.route("/api/<path:rest>")
+def api_not_found(rest):
+    """Any /api/* path not matched above is an unknown endpoint, not a SPA route."""
+    return jsonify({"error": "Not found"}), 404
+
+
+@app.route("/")
+@app.route("/<path:rest>")
+def spa(rest: str = ""):
+    """Serve the React SPA for any path not claimed by a route above.
+
+    Hashed JS/CSS live under /assets/* — served as files. Any other path
+    falls back to index.html so client-side routing works on reload.
+    """
+    if rest:
+        candidate = os.path.join(SPA_DIST_DIR, rest)
+        if os.path.isfile(candidate):
+            return send_from_directory(SPA_DIST_DIR, rest)
+    index_path = os.path.join(SPA_DIST_DIR, "index.html")
+    if not os.path.isfile(index_path):
+        return (
+            "SPA not built yet. Run `npm run build` in frontend/.",
+            503,
+        )
+    return send_from_directory(SPA_DIST_DIR, "index.html")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

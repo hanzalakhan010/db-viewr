@@ -1,4 +1,4 @@
-import { type KeyboardEvent } from 'react'
+import { useRef, useState, type KeyboardEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/api'
@@ -70,8 +70,30 @@ export function QueryPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: historyKey }),
   })
 
-  const run = () => {
-    const q = query.trim()
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const copyTimer = useRef<number | undefined>(undefined)
+
+  const copyToClipboard = async (text: string, i: number) => {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // clipboard API is unavailable over plain http — fall back to execCommand
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    setCopiedIdx(i)
+    window.clearTimeout(copyTimer.current)
+    copyTimer.current = window.setTimeout(() => setCopiedIdx(null), 1200)
+  }
+
+  const run = (override?: string) => {
+    const q = (override ?? query).trim()
     if (!q || runMut.isPending) return
     runMut.mutate(q)
   }
@@ -79,7 +101,9 @@ export function QueryPage() {
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault()
-      run()
+      const { selectionStart, selectionEnd } = e.currentTarget
+      const selected = query.slice(selectionStart, selectionEnd).trim()
+      run(selected || undefined)
     }
   }
 
@@ -101,7 +125,10 @@ export function QueryPage() {
         <div>
           <div className="mb-2 flex items-center justify-between text-xs text-text-secondary">
             <span>
-              Editor <span className="text-muted">— Cmd/Ctrl+Enter to run</span>
+              Editor{' '}
+              <span className="text-muted">
+                — Cmd/Ctrl+Enter to run (selection only, if any)
+              </span>
             </span>
             {result?.elapsed_ms != null && (
               <span className="rounded bg-border-light px-2 py-0.5 font-mono">
@@ -121,7 +148,7 @@ export function QueryPage() {
           <div className="mt-2 flex items-center gap-2">
             <button
               type="button"
-              onClick={run}
+              onClick={() => run()}
               disabled={runMut.isPending || !query.trim()}
               className="rounded bg-accent px-3 py-1.5 text-sm text-white hover:bg-accent-hover disabled:opacity-50"
             >
@@ -211,14 +238,23 @@ export function QueryPage() {
                 return (
                   <div
                     key={i}
-                    onClick={() => setQuery(item.q)}
+                    onClick={() => {
+                      setQuery(item.q)
+                      void copyToClipboard(item.q, i)
+                    }}
                     className="group cursor-pointer rounded border border-border bg-surface p-2 text-xs hover:border-accent"
                   >
                     <pre className="mb-1 whitespace-pre-wrap break-words font-mono text-text">
                       {preview}
                     </pre>
                     <div className="flex items-center justify-between text-muted">
-                      <span>{new Date(item.t).toLocaleString()}</span>
+                      <span>
+                        {copiedIdx === i ? (
+                          <span className="text-success">Copied!</span>
+                        ) : (
+                          new Date(item.t).toLocaleString()
+                        )}
+                      </span>
                       <button
                         type="button"
                         onClick={(e) => {
