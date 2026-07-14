@@ -12,3 +12,4 @@ frontend/node_modules/
 # Local data with credentials and query history — NEVER commit
 connections.json
 query_history.json
+bi_storage.json

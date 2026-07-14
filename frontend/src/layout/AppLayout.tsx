@@ -19,6 +19,14 @@ export function AppLayout() {
         <Link to="/" className="font-medium tracking-wide">
           db-viewr
         </Link>
+        <NavLink
+          to="/bi"
+          className={({ isActive }) =>
+            `text-sm ${isActive ? 'text-white' : 'text-sidebar-text hover:text-white'}`
+          }
+        >
+          BI
+        </NavLink>
         {conn && (
           <span className="text-sm text-sidebar-text">
             {c ? (

@@ -18,6 +18,12 @@ Both call the same underlying adapters; pick whichever feels nicer.
 - SQL / Mongo / PartiQL query editor with per-connection history
 - ERD viewer
 - Multiple saved connections with connectivity test
+- BI dashboards (SPA, PostgreSQL only): saved read-only queries → charts
+  (bar/line/area/pie/number) → drag/resize dashboards at `/app/bi`.
+  Queries run in a read-only session, which blocks writes (e.g. an
+  `UPDATE` fails with a database error); for a hard guarantee, point
+  the BI connection at a read-only database role.
+  Definitions persist in `bi_storage.json`.
 
 | Database       | Driver         |
 |----------------|----------------|
@@ -182,6 +188,7 @@ Environment variables, all optional:
 |-------------------------|----------------------------|------------------------------------------|
 | `CONNECTIONS_FILE`      | `./connections.json`       | Where saved connections persist          |
 | `QUERY_HISTORY_FILE`    | `./query_history.json`     | Per-connection query history             |
+| `BI_STORAGE_FILE`       | `./bi_storage.json`        | BI saved queries, charts, dashboards     |
 | `SECRET_KEY`            | random per-process         | Flask session secret                     |
 | `AWS_ACCESS_KEY_ID`     | —                          | Fallback AWS creds for DynamoDB          |
 | `AWS_SECRET_ACCESS_KEY` | —                          | Fallback AWS creds for DynamoDB          |

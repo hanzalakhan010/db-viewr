@@ -17,6 +17,7 @@ from flask import (
 )
 
 from adapters import get_adapter
+from bi_storage import BI_STORE_LOCK, load_bi_store, save_bi_store
 from storage import connection_public, load_connections, save_connections
 
 app = Flask(__name__)
@@ -857,6 +858,356 @@ def api_get_erd(conn_id):
         for t in erd_data["tables"].values()
     )
     return jsonify({"erd": erd_data, "rel_count": rel_count}), 200
+
+
+# ── BI: saved queries / charts / dashboards (SPA) ─────────────────────────────
+
+BI_CHART_TYPES = {"bar", "line", "area", "pie", "number"}
+
+
+def _bi_query_from_input(payload: dict, query_id: str) -> tuple[dict | None, str | None, int]:
+    name = payload.get("name")
+    conn_id = payload.get("conn_id")
+    sql = payload.get("sql") or ""
+    if not isinstance(name, str) or not name.strip():
+        return None, "name is required and must be a string", 400
+    if not isinstance(conn_id, str) or not conn_id.strip():
+        return None, "conn_id is required and must be a string", 400
+    if not isinstance(sql, str):
+        return None, "sql must be a string", 400
+    conn = load_connections().get(conn_id.strip())
+    if not conn:
+        return None, "Connection not found", 404
+    if conn.get("db_type") != "postgresql":
+        return None, "BI queries only run against PostgreSQL connections", 400
+    return {
+        "id": query_id,
+        "name": name.strip(),
+        "conn_id": conn_id.strip(),
+        "sql": sql,
+    }, None, 0
+
+
+def _bi_chart_from_input(payload: dict, chart_id: str, store: dict) -> tuple[dict | None, str | None]:
+    name = payload.get("name")
+    query_id = payload.get("query_id")
+    chart_type = payload.get("type")
+    if not isinstance(name, str) or not name.strip():
+        return None, "name is required and must be a string"
+    if not isinstance(query_id, str) or query_id.strip() not in store["queries"]:
+        return None, "unknown query_id"
+    if not isinstance(chart_type, str) or chart_type.strip() not in BI_CHART_TYPES:
+        return None, f"unknown chart type: {chart_type}"
+    x = payload.get("x") or ""
+    y = payload.get("y") or ""
+    series = payload.get("series")
+    if not isinstance(x, str) or not isinstance(y, str):
+        return None, "x and y must be strings"
+    if series is not None and not isinstance(series, str):
+        return None, "series must be a string"
+    data = {
+        "id": chart_id,
+        "name": name.strip(),
+        "query_id": query_id.strip(),
+        "type": chart_type.strip(),
+        "x": x,
+        "y": y,
+    }
+    if series:
+        data["series"] = series
+    return data, None
+
+
+def _bi_tiles_from_input(raw) -> tuple[list | None, str | None]:
+    if not isinstance(raw, list):
+        return None, "invalid tiles"
+    tiles = []
+    seen = set()
+    for t in raw:
+        if not isinstance(t, dict) or not t.get("chart_id"):
+            return None, "invalid tiles"
+        chart_id = str(t["chart_id"])
+        if chart_id in seen:
+            return None, "duplicate tile"
+        seen.add(chart_id)
+        coords = {}
+        for key, default in (("x", 0), ("y", 0), ("w", 4), ("h", 4)):
+            v = t.get(key, default)
+            if isinstance(v, bool):
+                return None, "invalid tiles"
+            try:
+                coords[key] = int(v)
+            except (TypeError, ValueError):
+                return None, "invalid tiles"
+        if coords["x"] < 0 or coords["y"] < 0:
+            return None, "invalid tiles"
+        if not (1 <= coords["w"] <= 48) or not (1 <= coords["h"] <= 48):
+            return None, "invalid tiles"
+        tiles.append({"chart_id": chart_id, **coords})
+    return tiles, None
+
+
+def _bi_remove_charts_from_dashboards(store: dict, chart_ids: set) -> None:
+    for dash in store["dashboards"].values():
+        dash["tiles"] = [
+            t for t in (dash.get("tiles") or [])
+            if t.get("chart_id") not in chart_ids
+        ]
+
+
+@app.route("/api/bi/queries", methods=["GET"])
+def api_bi_list_queries():
+    store = load_bi_store()
+    return jsonify({"queries": list(store["queries"].values())})
+
+
+@app.route("/api/bi/queries", methods=["POST"])
+def api_bi_create_query():
+    payload = request.get_json(silent=True) or {}
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        query_id = uuid.uuid4().hex[:8]
+        while query_id in store["queries"]:
+            query_id = uuid.uuid4().hex[:8]
+        data, err, code = _bi_query_from_input(payload, query_id)
+        if err:
+            return jsonify({"error": err}), code
+        store["queries"][query_id] = data
+        save_bi_store(store)
+    return jsonify({"query": data}), 201
+
+
+@app.route("/api/bi/queries/<query_id>", methods=["GET"])
+def api_bi_get_query(query_id):
+    store = load_bi_store()
+    if query_id not in store["queries"]:
+        return jsonify({"error": "Query not found"}), 404
+    return jsonify({"query": store["queries"][query_id]})
+
+
+@app.route("/api/bi/queries/<query_id>", methods=["PUT"])
+def api_bi_update_query(query_id):
+    payload = request.get_json(silent=True) or {}
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        if query_id not in store["queries"]:
+            return jsonify({"error": "Query not found"}), 404
+        data, err, code = _bi_query_from_input(payload, query_id)
+        if err:
+            return jsonify({"error": err}), code
+        store["queries"][query_id] = data
+        save_bi_store(store)
+    return jsonify({"query": data})
+
+
+@app.route("/api/bi/queries/<query_id>", methods=["DELETE"])
+def api_bi_delete_query(query_id):
+    # Cascade: deleting a query also deletes its charts and removes those
+    # charts from every dashboard's tiles.
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        if query_id not in store["queries"]:
+            return jsonify({"error": "Query not found"}), 404
+        store["queries"].pop(query_id)
+        chart_ids = {
+            cid for cid, c in store["charts"].items()
+            if c.get("query_id") == query_id
+        }
+        for cid in chart_ids:
+            store["charts"].pop(cid)
+        _bi_remove_charts_from_dashboards(store, chart_ids)
+        save_bi_store(store)
+    return ("", 204)
+
+
+@app.route("/api/bi/queries/<query_id>/run", methods=["POST"])
+def api_bi_run_query(query_id):
+    store = load_bi_store()
+    query = store["queries"].get(query_id)
+    if not query:
+        return jsonify({"error": "Query not found"}), 404
+    conns = load_connections()
+    conn = conns.get(query.get("conn_id"))
+    if not conn:
+        return jsonify({"error": "Connection not found"}), 404
+    if conn.get("db_type") != "postgresql":
+        return jsonify({"error": "BI queries only run against PostgreSQL connections"}), 400
+
+    sql = query.get("sql", "") or ""
+    if not isinstance(sql, str):
+        # Legacy/corrupt rows may hold a non-string sql; don't 500 on them.
+        sql = str(sql)
+    if not sql.strip():
+        return jsonify({
+            "columns": [],
+            "rows": [],
+            "affected": None,
+            "error": None,
+            "elapsed_ms": None,
+        }), 200
+
+    try:
+        adapter = get_adapter(conn)
+        adapter.connect(readonly=True)
+        try:
+            start = time.monotonic()
+            result = adapter.execute_query(sql)
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+        finally:
+            adapter.disconnect()
+    except Exception as e:
+        return jsonify({
+            "columns": [],
+            "rows": [],
+            "affected": None,
+            "error": str(e),
+            "elapsed_ms": None,
+        }), 200
+
+    return jsonify({
+        "columns": result.get("columns", []),
+        "rows": result.get("rows", []),
+        "affected": result.get("affected"),
+        "error": result.get("error"),
+        "elapsed_ms": elapsed_ms,
+    }), 200
+
+
+@app.route("/api/bi/charts", methods=["GET"])
+def api_bi_list_charts():
+    store = load_bi_store()
+    return jsonify({"charts": list(store["charts"].values())})
+
+
+@app.route("/api/bi/charts", methods=["POST"])
+def api_bi_create_chart():
+    payload = request.get_json(silent=True) or {}
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        chart_id = uuid.uuid4().hex[:8]
+        while chart_id in store["charts"]:
+            chart_id = uuid.uuid4().hex[:8]
+        data, err = _bi_chart_from_input(payload, chart_id, store)
+        if err:
+            return jsonify({"error": err}), 400
+        store["charts"][chart_id] = data
+        save_bi_store(store)
+    return jsonify({"chart": data}), 201
+
+
+@app.route("/api/bi/charts/<chart_id>", methods=["GET"])
+def api_bi_get_chart(chart_id):
+    store = load_bi_store()
+    if chart_id not in store["charts"]:
+        return jsonify({"error": "Chart not found"}), 404
+    return jsonify({"chart": store["charts"][chart_id]})
+
+
+@app.route("/api/bi/charts/<chart_id>", methods=["PUT"])
+def api_bi_update_chart(chart_id):
+    payload = request.get_json(silent=True) or {}
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        if chart_id not in store["charts"]:
+            return jsonify({"error": "Chart not found"}), 404
+        data, err = _bi_chart_from_input(payload, chart_id, store)
+        if err:
+            return jsonify({"error": err}), 400
+        store["charts"][chart_id] = data
+        save_bi_store(store)
+    return jsonify({"chart": data})
+
+
+@app.route("/api/bi/charts/<chart_id>", methods=["DELETE"])
+def api_bi_delete_chart(chart_id):
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        if chart_id not in store["charts"]:
+            return jsonify({"error": "Chart not found"}), 404
+        store["charts"].pop(chart_id)
+        _bi_remove_charts_from_dashboards(store, {chart_id})
+        save_bi_store(store)
+    return ("", 204)
+
+
+@app.route("/api/bi/dashboards", methods=["GET"])
+def api_bi_list_dashboards():
+    store = load_bi_store()
+    return jsonify({"dashboards": list(store["dashboards"].values())})
+
+
+@app.route("/api/bi/dashboards", methods=["POST"])
+def api_bi_create_dashboard():
+    payload = request.get_json(silent=True) or {}
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return jsonify({"error": "name is required and must be a string"}), 400
+    tiles, err = _bi_tiles_from_input(payload.get("tiles", []))
+    if err:
+        return jsonify({"error": err}), 400
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        dash_id = uuid.uuid4().hex[:8]
+        while dash_id in store["dashboards"]:
+            dash_id = uuid.uuid4().hex[:8]
+        data = {"id": dash_id, "name": name.strip(), "tiles": tiles}
+        store["dashboards"][dash_id] = data
+        save_bi_store(store)
+    return jsonify({"dashboard": data}), 201
+
+
+@app.route("/api/bi/dashboards/<dash_id>", methods=["GET"])
+def api_bi_get_dashboard(dash_id):
+    store = load_bi_store()
+    if dash_id not in store["dashboards"]:
+        return jsonify({"error": "Dashboard not found"}), 404
+    return jsonify({"dashboard": store["dashboards"][dash_id]})
+
+
+@app.route("/api/bi/dashboards/<dash_id>", methods=["PUT"])
+def api_bi_update_dashboard(dash_id):
+    payload = request.get_json(silent=True) or {}
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return jsonify({"error": "name is required and must be a string"}), 400
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        if dash_id not in store["dashboards"]:
+            return jsonify({"error": "Dashboard not found"}), 404
+        existing = store["dashboards"][dash_id]
+        tiles, err = _bi_tiles_from_input(payload.get("tiles", existing.get("tiles") or []))
+        if err:
+            return jsonify({"error": err}), 400
+        data = {"id": dash_id, "name": name.strip(), "tiles": tiles}
+        store["dashboards"][dash_id] = data
+        save_bi_store(store)
+    return jsonify({"dashboard": data})
+
+
+@app.route("/api/bi/dashboards/<dash_id>", methods=["DELETE"])
+def api_bi_delete_dashboard(dash_id):
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        if dash_id not in store["dashboards"]:
+            return jsonify({"error": "Dashboard not found"}), 404
+        store["dashboards"].pop(dash_id)
+        save_bi_store(store)
+    return ("", 204)
+
+
+@app.route("/api/bi/dashboards/<dash_id>/layout", methods=["PUT"])
+def api_bi_update_dashboard_layout(dash_id):
+    payload = request.get_json(silent=True) or {}
+    tiles, err = _bi_tiles_from_input(payload.get("tiles"))
+    if err:
+        return jsonify({"error": err}), 400
+    with BI_STORE_LOCK:
+        store = load_bi_store()
+        if dash_id not in store["dashboards"]:
+            return jsonify({"error": "Dashboard not found"}), 404
+        store["dashboards"][dash_id]["tiles"] = tiles
+        save_bi_store(store)
+    return jsonify({"dashboard": store["dashboards"][dash_id]})
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

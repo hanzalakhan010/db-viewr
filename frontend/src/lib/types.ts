@@ -131,6 +131,71 @@ export interface ErdResponse {
   rel_count: number
 }
 
+export type BiChartType = 'bar' | 'line' | 'area' | 'pie' | 'number'
+
+export interface BiQuery {
+  id: string
+  name: string
+  conn_id: string
+  sql: string
+}
+
+export interface BiChart {
+  id: string
+  name: string
+  query_id: string
+  type: BiChartType
+  x: string
+  y: string
+  series?: string
+}
+
+export interface BiTile {
+  chart_id: string
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+export interface BiDashboard {
+  id: string
+  name: string
+  tiles: BiTile[]
+}
+
+export interface BiQueriesResponse {
+  queries: BiQuery[]
+}
+
+export interface BiQueryResponse {
+  query: BiQuery
+}
+
+export interface BiChartsResponse {
+  charts: BiChart[]
+}
+
+export interface BiChartResponse {
+  chart: BiChart
+}
+
+export interface BiDashboardsResponse {
+  dashboards: BiDashboard[]
+}
+
+export interface BiDashboardResponse {
+  dashboard: BiDashboard
+}
+
+export const BI_CHART_TYPE_LABELS: Record<BiChartType, string> = {
+  bar: 'Bar',
+  line: 'Line',
+  area: 'Area',
+  pie: 'Pie',
+  number: 'Number',
+}
+
 export const DB_TYPE_LABELS: Record<DbType, string> = {
   postgresql: 'PostgreSQL',
   mysql: 'MySQL / MariaDB',

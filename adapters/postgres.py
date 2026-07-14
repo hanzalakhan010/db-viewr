@@ -6,15 +6,27 @@ from .filters import build_where
 
 class PostgresAdapter(BaseAdapter):
 
-    def connect(self):
+    def connect(self, readonly: bool = False):
+        kwargs = {}
+        if readonly:
+            kwargs["connect_timeout"] = 10
         self._conn = psycopg2.connect(
             host=self.config["host"],
             port=int(self.config.get("port", 5432)),
             dbname=self.config["database"],
             user=self.config["user"],
             password=self.config["password"],
+            **kwargs,
         )
+        self._readonly = readonly
         self._conn.autocommit = False
+        if readonly:
+            try:
+                self._conn.set_session(readonly=True)
+            except Exception:
+                self._conn.close()
+                self._conn = None
+                raise
 
     def disconnect(self):
         if self._conn:
@@ -104,7 +116,12 @@ class PostgresAdapter(BaseAdapter):
                     return {"columns": columns, "rows": rows, "affected": None, "error": None}
                 else:
                     affected = cur.rowcount
-                    self._conn.commit()
+                    if getattr(self, "_readonly", False):
+                        # Belt-and-braces: a readonly session must never commit,
+                        # even if a multi-statement query changed session defaults.
+                        self._conn.rollback()
+                    else:
+                        self._conn.commit()
                     return {"columns": [], "rows": [], "affected": affected, "error": None}
         except Exception as e:
             self._conn.rollback()
