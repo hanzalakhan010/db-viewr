@@ -1,4 +1,26 @@
+import socket
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+
+def resolve_host_with_timeout(host: str, port: int, timeout: float = 10) -> None:
+    """Raise ConnectionError if `host` doesn't resolve within `timeout` seconds.
+
+    DB drivers' own connect_timeout only bounds the TCP handshake, not DNS
+    resolution — a stalled resolver (e.g. a flaky path to a private RDS
+    hostname) can hang past it indefinitely. Resolving up front in a worker
+    thread lets us give up on a hung lookup instead of blocking the caller.
+    """
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(socket.getaddrinfo, host, port)
+    try:
+        future.result(timeout=timeout)
+    except FutureTimeoutError:
+        raise ConnectionError(
+            f"Could not resolve host '{host}': DNS lookup timed out after {timeout}s"
+        )
+    finally:
+        pool.shutdown(wait=False)
 
 
 class BaseAdapter(ABC):

@@ -1,18 +1,22 @@
 import psycopg2
 import psycopg2.extras
-from .base import BaseAdapter
+from .base import BaseAdapter, resolve_host_with_timeout
 from .filters import build_where
 
 
 class PostgresAdapter(BaseAdapter):
 
     def connect(self):
+        host = self.config["host"]
+        port = int(self.config.get("port", 5432))
+        resolve_host_with_timeout(host, port)
         self._conn = psycopg2.connect(
-            host=self.config["host"],
-            port=int(self.config.get("port", 5432)),
+            host=host,
+            port=port,
             dbname=self.config["database"],
             user=self.config["user"],
             password=self.config["password"],
+            connect_timeout=10,
         )
         self._conn.autocommit = False
 
@@ -160,53 +164,56 @@ class PostgresAdapter(BaseAdapter):
         schema = self.config.get("schema", "public")
 
         # ── All columns for all base tables in one query ──────────────────────
+        # Queries pg_catalog directly rather than information_schema: the
+        # latter's views run a privilege check per row, which on catalogs
+        # with many tables/columns turns a sub-10ms lookup into tens of
+        # seconds (observed: ~50s vs ~8ms on a schema with ~1200 columns).
         col_sql = """
             SELECT
-                c.table_name,
-                c.column_name,
-                c.data_type,
-                c.is_nullable,
-                c.ordinal_position,
-                CASE WHEN pk.column_name IS NOT NULL THEN TRUE ELSE FALSE END AS is_pk
-            FROM information_schema.columns c
-            JOIN information_schema.tables t
-              ON t.table_name   = c.table_name
-             AND t.table_schema = c.table_schema
-             AND t.table_type   = 'BASE TABLE'
-            LEFT JOIN (
-                SELECT kcu.table_name, kcu.column_name
-                FROM information_schema.table_constraints tc
-                JOIN information_schema.key_column_usage kcu
-                  ON tc.constraint_name = kcu.constraint_name
-                 AND tc.table_schema    = kcu.table_schema
-                WHERE tc.constraint_type = 'PRIMARY KEY'
-                  AND tc.table_schema   = %s
-            ) pk ON pk.table_name = c.table_name AND pk.column_name = c.column_name
-            WHERE c.table_schema = %s
-            ORDER BY c.table_name, c.ordinal_position
+                c.relname AS table_name,
+                a.attname AS column_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                NOT a.attnotnull AS is_nullable,
+                a.attnum AS ordinal_position,
+                EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_constraint con
+                    WHERE con.conrelid = c.oid
+                      AND con.contype = 'p'
+                      AND a.attnum = ANY(con.conkey)
+                ) AS is_pk
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_attribute a
+              ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+            WHERE n.nspname = %s
+              AND c.relkind IN ('r', 'p')
+            ORDER BY c.relname, a.attnum
         """
 
         # ── All FK relationships in one query ─────────────────────────────────
         fk_sql = """
             SELECT
-                kcu.table_name  AS from_table,
-                kcu.column_name AS from_col,
-                ccu.table_name  AS to_table,
-                ccu.column_name AS to_col
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-             AND tc.table_schema    = kcu.table_schema
-            JOIN information_schema.constraint_column_usage ccu
-              ON ccu.constraint_name = tc.constraint_name
-             AND ccu.table_schema    = tc.table_schema
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_schema    = %s
+                cl1.relname AS from_table,
+                a1.attname  AS from_col,
+                cl2.relname AS to_table,
+                a2.attname  AS to_col
+            FROM pg_catalog.pg_constraint con
+            JOIN pg_catalog.pg_class cl1 ON cl1.oid = con.conrelid
+            JOIN pg_catalog.pg_namespace n1 ON n1.oid = cl1.relnamespace
+            JOIN pg_catalog.pg_class cl2 ON cl2.oid = con.confrelid
+            JOIN LATERAL unnest(con.conkey, con.confkey)
+              AS cols(from_attnum, to_attnum) ON true
+            JOIN pg_catalog.pg_attribute a1
+              ON a1.attrelid = con.conrelid AND a1.attnum = cols.from_attnum
+            JOIN pg_catalog.pg_attribute a2
+              ON a2.attrelid = con.confrelid AND a2.attnum = cols.to_attnum
+            WHERE con.contype = 'f'
+              AND n1.nspname = %s
         """
 
         tables: dict = {}
         with self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(col_sql, (schema, schema))
+            cur.execute(col_sql, (schema,))
             for row in cur.fetchall():
                 tname = row["table_name"]
                 if tname not in tables:
@@ -215,7 +222,7 @@ class PostgresAdapter(BaseAdapter):
                     "name": row["column_name"],
                     "type": row["data_type"],
                     "primary_key": bool(row["is_pk"]),
-                    "nullable": row["is_nullable"] == "YES",
+                    "nullable": bool(row["is_nullable"]),
                 })
 
             cur.execute(fk_sql, (schema,))

@@ -1,20 +1,24 @@
 import pymysql
 import pymysql.cursors
-from .base import BaseAdapter
+from .base import BaseAdapter, resolve_host_with_timeout
 from .filters import build_where
 
 
 class MySQLAdapter(BaseAdapter):
 
     def connect(self):
+        host = self.config["host"]
+        port = int(self.config.get("port", 3306))
+        resolve_host_with_timeout(host, port)
         self._conn = pymysql.connect(
-            host=self.config["host"],
-            port=int(self.config.get("port", 3306)),
+            host=host,
+            port=port,
             database=self.config["database"],
             user=self.config["user"],
             password=self.config["password"],
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=False,
+            connect_timeout=10,
         )
 
     def disconnect(self):
