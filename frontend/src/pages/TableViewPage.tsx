@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/api'
 import type { TableRowsResponse } from '@/lib/types'
 import { Loading } from '@/components/Spinner'
@@ -31,10 +31,13 @@ export function TableViewPage() {
   const queryString = searchParams.toString()
   const path = `connections/${conn}/tables/${encodeURIComponent(table ?? '')}${queryString ? `?${queryString}` : ''}`
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, isPlaceholderData } = useQuery({
     queryKey: ['tableRows', conn, table, queryString],
     queryFn: () => apiFetch<TableRowsResponse>(path),
     enabled: !!conn && !!table,
+    // Keep showing the current rows while the next page/sort/filter loads
+    // instead of flashing a spinner on every interaction
+    placeholderData: keepPreviousData,
   })
 
   const [editIdx, setEditIdx] = useState<number | null>(null)
@@ -134,7 +137,9 @@ export function TableViewPage() {
         </div>
       </div>
 
-      <div className="overflow-auto rounded-lg border border-border bg-surface">
+      <div
+        className={`overflow-auto rounded-lg border border-border bg-surface ${isPlaceholderData ? 'opacity-60' : ''}`}
+      >
         {isLoading ? (
           <div className="p-6"><Loading /></div>
         ) : !data || rows.length === 0 ? (

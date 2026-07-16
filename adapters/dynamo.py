@@ -1,6 +1,19 @@
 import json
+import threading
+
 import boto3
+from botocore.config import Config
 from .base import BaseAdapter
+
+# boto3 clients/resources are expensive to build (JSON model loading) and
+# resources are not thread-safe to share — cache them per thread + config.
+_TLS = threading.local()
+
+_BOTO_CONFIG = Config(
+    connect_timeout=5,
+    read_timeout=30,
+    retries={"max_attempts": 2},
+)
 
 _DYNAMO_TYPE_MAP = {
     "S": "String", "N": "Number", "B": "Binary",
@@ -20,12 +33,24 @@ class DynamoAdapter(BaseAdapter):
         if endpoint:
             kwargs["endpoint_url"] = endpoint
 
-        self._resource = boto3.resource("dynamodb", **kwargs)
-        self._client = boto3.client("dynamodb", **kwargs)
-        # Quick connectivity check
-        self._client.list_tables(Limit=1)
+        key = tuple(sorted(kwargs.items()))
+        cache = getattr(_TLS, "cache", None)
+        if cache is None:
+            cache = _TLS.cache = {}
+        cached = cache.get(key)
+        if cached:
+            self._resource, self._client = cached
+            return
+
+        resource = boto3.resource("dynamodb", config=_BOTO_CONFIG, **kwargs)
+        client = boto3.client("dynamodb", config=_BOTO_CONFIG, **kwargs)
+        # Quick connectivity check (first use of this config only)
+        client.list_tables(Limit=1)
+        cache[key] = (resource, client)
+        self._resource, self._client = resource, client
 
     def disconnect(self):
+        # Clients are cached per thread — just drop our references
         self._resource = None
         self._client = None
 

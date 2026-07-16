@@ -2,15 +2,21 @@ import pymysql
 import pymysql.cursors
 from .base import BaseAdapter, resolve_host_with_timeout
 from .filters import build_where
+from .pool import POOL
 
 
 class MySQLAdapter(BaseAdapter):
 
-    def connect(self):
+    def _pool_key(self):
+        c = self.config
+        return ("mysql", c.get("host"), str(c.get("port", 3306)),
+                c.get("database"), c.get("user"), c.get("password"))
+
+    def _open_connection(self):
         host = self.config["host"]
         port = int(self.config.get("port", 3306))
         resolve_host_with_timeout(host, port)
-        self._conn = pymysql.connect(
+        return pymysql.connect(
             host=host,
             port=port,
             database=self.config["database"],
@@ -18,12 +24,33 @@ class MySQLAdapter(BaseAdapter):
             password=self.config["password"],
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=False,
-            connect_timeout=10,
+            connect_timeout=5,
+        )
+
+    @staticmethod
+    def _validate(conn):
+        try:
+            conn.ping(reconnect=False)
+            return True
+        except Exception:
+            return False
+
+    def connect(self):
+        self._conn = POOL.acquire(
+            self._pool_key(),
+            factory=self._open_connection,
+            validate=self._validate,
+            close=lambda c: c.close(),
         )
 
     def disconnect(self):
         if self._conn:
-            self._conn.close()
+            POOL.release(
+                self._pool_key(),
+                self._conn,
+                reset=lambda c: c.rollback(),
+                close=lambda c: c.close(),
+            )
             self._conn = None
 
     def list_tables(self) -> list[str]:
