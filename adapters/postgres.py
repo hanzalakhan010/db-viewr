@@ -7,6 +7,9 @@ from .pool import POOL
 
 class PostgresAdapter(BaseAdapter):
 
+    QUOTE_CHAR = '"'
+    PLACEHOLDER = "%s"
+
     def _pool_key(self):
         c = self.config
         return ("postgresql", c.get("host"), str(c.get("port", 5432)),
@@ -165,6 +168,18 @@ class PostgresAdapter(BaseAdapter):
         except Exception as e:
             self._conn.rollback()
             return {"columns": [], "rows": [], "affected": None, "error": str(e)}
+
+    def execute_select(self, sql: str, params: list | None = None) -> dict:
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(sql, params or [])
+                columns = [d[0] for d in cur.description] if cur.description else []
+                rows = [list(r) for r in cur.fetchall()]
+                self._conn.rollback()  # read-only: never persist
+                return {"columns": columns, "rows": rows, "error": None}
+        except Exception as e:
+            self._conn.rollback()
+            return {"columns": [], "rows": [], "error": str(e)}
 
     def update_row(self, table: str, identity: dict, new_values: dict) -> dict:
         if not identity:

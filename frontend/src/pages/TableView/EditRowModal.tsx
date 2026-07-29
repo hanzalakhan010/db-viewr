@@ -21,7 +21,7 @@ function toDisplay(v: unknown): string {
 
 export function EditRowModal({ conn, table, schema, columns, row, onClose, onSuccess }: Props) {
   // Build identity: PK columns if any are flagged, else all columns.
-  const pkCols = schema.filter((c) => c.pk).map((c) => c.name)
+  const pkCols = schema.filter((c) => c.primary_key).map((c) => c.name)
   const identityCols = pkCols.length > 0 ? pkCols : columns
 
   const [values, setValues] = useState<Record<string, string>>(() => {

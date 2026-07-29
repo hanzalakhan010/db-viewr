@@ -3,21 +3,16 @@ import os
 import threading
 import time
 import uuid
-from urllib.parse import urlencode
 
 from flask import (
     Flask,
-    abort,
-    flash,
     jsonify,
-    redirect,
-    render_template,
     request,
     send_from_directory,
-    url_for,
 )
 
 from adapters import get_adapter
+from adapters.views import build_view_query
 from storage import connection_public, load_connections, save_connections
 
 app = Flask(__name__)
@@ -25,14 +20,17 @@ app = Flask(__name__)
 SPA_DIST_DIR = os.path.join(os.path.dirname(__file__), "static", "dist")
 
 
-@app.route("/app/")
-@app.route("/app/<path:rest>")
+@app.route("/")
+@app.route("/<path:rest>")
 def spa(rest: str = ""):
-    """Serve the React SPA at /app/* during migration.
+    """Serve the React SPA at the root.
 
-    Hashed JS/CSS live under /app/assets/* — served as files. Any other path
+    Hashed JS/CSS live under /assets/* — served as files. Any other path
     falls back to index.html so client-side routing works on reload.
+    Unregistered /api/* paths stay JSON 404s instead of getting index.html.
     """
+    if rest == "api" or rest.startswith("api/"):
+        return jsonify({"error": "Not found"}), 404
     if rest:
         candidate = os.path.join(SPA_DIST_DIR, rest)
         if os.path.isfile(candidate):
@@ -44,7 +42,6 @@ def spa(rest: str = ""):
             503,
         )
     return send_from_directory(SPA_DIST_DIR, "index.html")
-app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 
 # Allow overriding via env var so Docker can mount a persistent data volume
 QUERY_HISTORY_FILE = os.environ.get(
@@ -56,13 +53,6 @@ SQL_DB_TYPES = {"postgresql", "mysql", "sqlite"}
 
 # ── Connection persistence ─────────────────────────────────────────────────────
 # load_connections / save_connections live in storage.py (shared with mcp_server.py)
-
-def get_conn_or_404(conn_id: str) -> dict:
-    conns = load_connections()
-    if conn_id not in conns:
-        abort(404)
-    return conns[conn_id]
-
 
 # ── Query history persistence ─────────────────────────────────────────────────
 
@@ -96,6 +86,36 @@ def append_history(conn_id: str, query: str) -> None:
     save_query_history(history)
 
 
+# ── Saved views persistence ─────────────────────────────────────────────────────
+# A "view" is a stored join spec (base table + FK/PK joins + selected columns +
+# filters), not a frozen result set — reopening re-runs it against live data.
+# Persisted like query history: a JSON map of {conn_id: [view, ...]}.
+
+VIEWS_FILE = os.environ.get(
+    "VIEWS_FILE",
+    os.path.join(os.path.dirname(__file__), "views.json"),
+)
+
+
+def load_views() -> dict:
+    if not os.path.exists(VIEWS_FILE):
+        return {}
+    try:
+        with open(VIEWS_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_views(views: dict) -> None:
+    with open(VIEWS_FILE, "w") as f:
+        json.dump(views, f, indent=2)
+
+
+def get_views_for(conn_id: str) -> list:
+    return load_views().get(conn_id, [])
+
+
 # ── Schema cache ────────────────────────────────────────────────────────────────
 # Table schemas rarely change but were re-introspected on every page/sort/filter
 # request — an information_schema join per click on remote DBs. Cache briefly.
@@ -123,378 +143,61 @@ def get_schema_cached(conn_id: str, adapter, table: str) -> list[dict]:
 
 def invalidate_schema_cache(conn_id: str) -> None:
     """Drop cached schemas for a connection (after DDL-capable queries or
-    connection edits)."""
+    connection edits). Also drops the FK graph, which DDL can change."""
     with _schema_cache_lock:
         for key in [k for k in _schema_cache if k[0] == conn_id]:
             del _schema_cache[key]
-
-
-# ── Context processor: inject connections into every template ──────────────────
-
-@app.context_processor
-def inject_globals():
-    return {"connections": load_connections()}
-
-
-# ── Index ──────────────────────────────────────────────────────────────────────
-
-@app.route("/")
-def index():
-    return render_template("index.html", title="Connections")
-
-
-# ── New connection ─────────────────────────────────────────────────────────────
-
-@app.route("/connections/new", methods=["GET", "POST"])
-def new_connection():
-    if request.method == "POST":
-        data = request.form.to_dict()
-        conn_id = uuid.uuid4().hex[:8]
-        data["id"] = conn_id
-        conns = load_connections()
-        conns[conn_id] = data
-        save_connections(conns)
-        flash(f"Connection \"{data.get('name', conn_id)}\" saved.", "success")
-        return redirect(url_for("index"))
-    return render_template("connection_form.html", conn=None, title="New Connection")
-
-
-# ── Edit connection ────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/edit", methods=["GET", "POST"])
-def edit_connection(conn_id):
-    conn = get_conn_or_404(conn_id)
-    if request.method == "POST":
-        data = request.form.to_dict()
-        data["id"] = conn_id
-        # Preserve password if left blank (edit form)
-        if not data.get("password") and conn.get("password"):
-            data["password"] = conn["password"]
-        if not data.get("secret_access_key") and conn.get("secret_access_key"):
-            data["secret_access_key"] = conn["secret_access_key"]
-        conns = load_connections()
-        conns[conn_id] = data
-        save_connections(conns)
-        invalidate_schema_cache(conn_id)
-        flash("Connection updated.", "success")
-        return redirect(url_for("index"))
-    return render_template("connection_form.html", conn=conn, title="Edit Connection")
-
-
-# ── Delete connection ──────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/delete", methods=["POST"])
-def delete_connection(conn_id):
-    conns = load_connections()
-    conns.pop(conn_id, None)
-    save_connections(conns)
-    invalidate_schema_cache(conn_id)
-    flash("Connection deleted.", "info")
-    return redirect(url_for("index"))
-
-
-# ── Test connectivity (JSON) ───────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/test", methods=["POST"])
-def test_connection(conn_id):
-    conn = get_conn_or_404(conn_id)
-    try:
-        adapter = get_adapter(conn)
-        ok, err = adapter.test_connection()
-    except Exception as e:
-        ok, err = False, str(e)
-    return jsonify({"ok": ok, "error": err})
-
-
-# ── Table / collection list ────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/tables")
-def list_tables(conn_id):
-    conn = get_conn_or_404(conn_id)
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            tables = adapter.list_tables()
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        flash(f"Error listing tables: {e}", "error")
-        tables = []
-    return render_template(
-        "tables.html",
-        conn=conn,
-        tables=tables,
-        title=conn.get("name"),
-        active_conn_id=conn_id,
-    )
-
-
-# ── Table / collection data view ───────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/tables/<path:table>")
-def view_table(conn_id, table):
-    conn = get_conn_or_404(conn_id)
-    db_type = conn.get("db_type", "")
-    page = max(1, int(request.args.get("page", 1)))
-    page_size = max(1, min(500, int(request.args.get("page_size", 50))))
-
-    filters = _parse_filters(request.args, db_type)
-    filter_qs = urlencode({k: v for k, v in request.args.items() if k != "page"})
-
-    schema = []
-    data = {"columns": [], "rows": [], "total": None, "page": page,
-            "page_size": page_size, "has_next": False}
-    error = None
-    elapsed_ms = None
-
-    sort = None  # parsed after schema is loaded so we can validate the column
-
-    try:
-        start = time.monotonic()
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            schema = get_schema_cached(conn_id, adapter, table)
-            sort = _parse_sort(request.args, schema)
-            data = adapter.get_rows(table, page, page_size, filters, sort)
-            elapsed_ms = int((time.monotonic() - start) * 1000)
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        error = str(e)
-
-    return render_template(
-        "table_view.html",
-        conn=conn,
-        table=table,
-        schema=schema,
-        data=data,
-        filters=filters,
-        filter_qs=filter_qs,
-        sort=sort,
-        elapsed_ms=elapsed_ms,
-        db_type=db_type,
-        error=error,
-        title=f"{table} — {conn.get('name')}",
-        active_conn_id=conn_id,
-    )
-
-
-# ── CSV export ────────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/tables/<path:table>/export.csv")
-def export_table_csv(conn_id, table):
-    import csv as csvmod
-    import io
-    from flask import Response
-
-    conn = get_conn_or_404(conn_id)
-    db_type = conn.get("db_type", "")
-    filters = _parse_filters(request.args, db_type)
-    max_rows = max(1, min(100000, int(request.args.get("limit", 10000))))
-
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            schema = get_schema_cached(conn_id, adapter, table)
-            sort = _parse_sort(request.args, schema)
-
-            rows_acc: list = []
-            columns: list = []
-            page = 1
-            page_size = 1000
-            while len(rows_acc) < max_rows:
-                d = adapter.get_rows(table, page, page_size, filters, sort)
-                if not columns:
-                    columns = d.get("columns") or []
-                rows_acc.extend(d.get("rows") or [])
-                if not d.get("has_next") or not d.get("rows"):
-                    break
-                page += 1
-            rows_acc = rows_acc[:max_rows]
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        return Response(f"Export failed: {e}", status=500, mimetype="text/plain")
-
-    buf = io.StringIO()
-    writer = csvmod.writer(buf)
-    writer.writerow(columns)
-    for r in rows_acc:
-        writer.writerow(["" if v is None else v for v in r])
-
-    return Response(
-        buf.getvalue(),
-        mimetype="text/csv",
-        headers={
-            "Content-Disposition": f'attachment; filename="{table}.csv"',
-        },
-    )
-
-
-# ── Update row ────────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/tables/<path:table>/update", methods=["POST"])
-def update_row(conn_id, table):
-    conn = get_conn_or_404(conn_id)
-
-    identity = {k[len("identity_"):]: v
-                for k, v in request.form.items()
-                if k.startswith("identity_")}
-    new_values = {k[len("val_"):]: v
-                  for k, v in request.form.items()
-                  if k.startswith("val_")}
-    for c in request.form.getlist("null_col"):
-        new_values[c] = "__NULL__"
-
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            result = adapter.update_row(table, identity, new_values)
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        result = {"ok": False, "error": str(e)}
-
-    if result.get("ok"):
-        flash("Row updated.", "success")
-    else:
-        flash(f"Update failed: {result.get('error')}", "error")
-    return redirect(url_for("view_table", conn_id=conn_id, table=table))
-
-
-# ── Insert row ────────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/tables/<path:table>/insert", methods=["POST"])
-def insert_row(conn_id, table):
-    conn = get_conn_or_404(conn_id)
-    db_type = conn.get("db_type", "")
-
-    if db_type in SQL_DB_TYPES:
-        values = {k[4:]: v for k, v in request.form.items() if k.startswith("col_")}
-        null_cols = request.form.getlist("null_col")
-        for c in null_cols:
-            values[c] = "__NULL__"
-    else:
-        values = {"__document__": request.form.get("document", "")}
-
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            result = adapter.insert_row(table, values)
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        result = {"ok": False, "error": str(e)}
-
-    if result.get("ok"):
-        flash("Row inserted.", "success")
-    else:
-        flash(f"Insert failed: {result.get('error')}", "error")
-    return redirect(url_for("view_table", conn_id=conn_id, table=table))
-
-
-# ── ERD viewer ────────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/erd")
-def erd_view(conn_id):
-    conn = get_conn_or_404(conn_id)
-    erd_data = {"tables": {}, "has_relations": False}
-    error = None
-    try:
-        adapter = get_adapter(conn)
-        adapter.connect()
-        try:
-            erd_data = adapter.get_erd_data()
-        finally:
-            adapter.disconnect()
-    except Exception as e:
-        error = str(e)
-
-    rel_count = sum(
-        len(t.get("foreign_keys", []))
-        for t in erd_data["tables"].values()
-    )
-
-    return render_template(
-        "erd.html",
-        conn=conn,
-        erd_data=erd_data,
-        rel_count=rel_count,
-        error=error,
-        title=f"ERD — {conn.get('name')}",
-        active_conn_id=conn_id,
-    )
-
-
-# ── Query editor ───────────────────────────────────────────────────────────────
-
-@app.route("/connections/<conn_id>/query", methods=["GET", "POST"])
-def query_editor(conn_id):
-    conn = get_conn_or_404(conn_id)
-    db_type = conn.get("db_type", "")
-    result = None
-    query = request.form.get("query", "") if request.method == "POST" else ""
-
-    elapsed_ms = None
-    if request.method == "POST" and query.strip():
-        append_history(conn_id, query)
-        try:
-            start = time.monotonic()
-            adapter = get_adapter(conn)
-            adapter.connect()
-            try:
-                result = adapter.execute_query(query)
-                elapsed_ms = int((time.monotonic() - start) * 1000)
-            finally:
-                adapter.disconnect()
-            invalidate_schema_cache(conn_id)  # query may have been DDL
-        except Exception as e:
-            result = {"columns": [], "rows": [], "affected": None, "error": str(e)}
-
-    return render_template(
-        "query.html",
-        conn=conn,
-        db_type=db_type,
-        query=query,
-        result=result,
-        elapsed_ms=elapsed_ms,
-        history=get_history_for(conn_id),
-        title=f"Query — {conn.get('name')}",
-        active_conn_id=conn_id,
-    )
-
-
-# ── Query history: delete one / clear all ──────────────────────────────────────
-
-@app.route("/connections/<conn_id>/query/history/delete", methods=["POST"])
-def delete_query_history_item(conn_id):
-    get_conn_or_404(conn_id)
-    try:
-        index = int(request.form.get("index", "-1"))
-    except ValueError:
-        index = -1
-    history = load_query_history()
-    items = history.get(conn_id, [])
-    if 0 <= index < len(items):
-        items.pop(index)
-        history[conn_id] = items
-        save_query_history(history)
-    return redirect(url_for("query_editor", conn_id=conn_id))
-
-
-@app.route("/connections/<conn_id>/query/history/clear", methods=["POST"])
-def clear_query_history(conn_id):
-    get_conn_or_404(conn_id)
-    history = load_query_history()
-    if conn_id in history:
-        history.pop(conn_id)
-        save_query_history(history)
-    return redirect(url_for("query_editor", conn_id=conn_id))
+    with _erd_cache_lock:
+        _erd_cache.pop(conn_id, None)
+
+
+# ── FK-graph (ERD) cache ─────────────────────────────────────────────────────────
+# get_erd_data() introspects the whole schema — too heavy to run on every table
+# view for the FK links, and the view builder hits it repeatedly. Cache per
+# connection with the same TTL as schemas; invalidated together (above).
+
+ERD_CACHE_TTL = 60.0
+_erd_cache: dict[str, tuple[float, dict]] = {}
+_erd_cache_lock = threading.Lock()
+
+
+def get_erd_cached(conn_id: str, adapter) -> dict:
+    with _erd_cache_lock:
+        hit = _erd_cache.get(conn_id)
+        if hit and (time.monotonic() - hit[0]) < ERD_CACHE_TTL:
+            return hit[1]
+    erd = adapter.get_erd_data()
+    now = time.monotonic()
+    with _erd_cache_lock:
+        for k in [k for k, (ts, _) in _erd_cache.items() if now - ts >= ERD_CACHE_TTL]:
+            del _erd_cache[k]
+        _erd_cache[conn_id] = (now, erd)
+    return erd
+
+
+def _relations_for(erd: dict, table: str) -> dict:
+    """Split the FK graph into edges touching `table`.
+
+    outbound: this table's own FKs → {column, ref_table, ref_column}
+              (click the FK cell to reach the parent row).
+    inbound:  other tables' FKs that point at this table →
+              {from_table, from_column, ref_column}
+              (jump to children filtered by from_column = this row's ref_column).
+    """
+    tables = erd.get("tables", {})
+    outbound = list(tables.get(table, {}).get("foreign_keys", []))
+    inbound = []
+    for tname, tinfo in tables.items():
+        if tname == table:
+            continue
+        for fk in tinfo.get("foreign_keys", []):
+            if fk.get("ref_table") == table:
+                inbound.append({
+                    "from_table": tname,
+                    "from_column": fk["column"],
+                    "ref_column": fk["ref_column"],
+                })
+    return {"outbound": outbound, "inbound": inbound}
 
 
 # ── Filter parsing ─────────────────────────────────────────────────────────────
@@ -555,12 +258,12 @@ def _parse_filters(args, db_type: str):
 
 @app.errorhandler(404)
 def not_found(e):
-    return render_template("error.html", code=404, message="Page not found."), 404
+    return jsonify({"error": "Not found"}), 404
 
 
 @app.errorhandler(500)
 def server_error(e):
-    return render_template("error.html", code=500, message=str(e)), 500
+    return jsonify({"error": str(e)}), 500
 
 
 # ── JSON API (SPA) ────────────────────────────────────────────────────────────
@@ -710,6 +413,7 @@ def api_view_table(conn_id, table):
 
     filters = _parse_filters(request.args, db_type)
 
+    relations = {"outbound": [], "inbound": []}
     try:
         t0 = time.monotonic()
         adapter = get_adapter(conn)
@@ -721,6 +425,10 @@ def api_view_table(conn_id, table):
             sort = _parse_sort(request.args, schema)
             data = adapter.get_rows(table, page, page_size, filters, sort)
             t_rows = time.monotonic()
+            # FK edges for this table, so the SPA can linkify cells (outbound)
+            # and offer "referenced by" jumps (inbound). SQL only; cached.
+            if db_type in SQL_DB_TYPES:
+                relations = _relations_for(get_erd_cached(conn_id, adapter), table)
         finally:
             adapter.disconnect()
     except Exception as e:
@@ -729,6 +437,7 @@ def api_view_table(conn_id, table):
     return jsonify({
         "schema": schema,
         "data": data,
+        "relations": relations,
         # Full request cost, not just the rows query — connect + schema
         # dominate on remote DBs and used to be hidden from this number
         "elapsed_ms": int((t_rows - t0) * 1000),
@@ -739,6 +448,60 @@ def api_view_table(conn_id, table):
         },
         "db_type": db_type,
     })
+
+
+@app.route("/api/connections/<conn_id>/tables/<path:table>/export.csv")
+def api_export_table_csv(conn_id, table):
+    import csv as csvmod
+    import io
+    from flask import Response
+
+    conns = load_connections()
+    if conn_id not in conns:
+        return jsonify({"error": "Connection not found"}), 404
+    conn = conns[conn_id]
+    db_type = conn.get("db_type", "")
+    filters = _parse_filters(request.args, db_type)
+    max_rows = max(1, min(100000, int(request.args.get("limit", 10000))))
+
+    try:
+        adapter = get_adapter(conn)
+        adapter.connect()
+        try:
+            schema = get_schema_cached(conn_id, adapter, table)
+            sort = _parse_sort(request.args, schema)
+
+            rows_acc: list = []
+            columns: list = []
+            page = 1
+            page_size = 1000
+            while len(rows_acc) < max_rows:
+                d = adapter.get_rows(table, page, page_size, filters, sort)
+                if not columns:
+                    columns = d.get("columns") or []
+                rows_acc.extend(d.get("rows") or [])
+                if not d.get("has_next") or not d.get("rows"):
+                    break
+                page += 1
+            rows_acc = rows_acc[:max_rows]
+        finally:
+            adapter.disconnect()
+    except Exception as e:
+        return Response(f"Export failed: {e}", status=500, mimetype="text/plain")
+
+    buf = io.StringIO()
+    writer = csvmod.writer(buf)
+    writer.writerow(columns)
+    for r in rows_acc:
+        writer.writerow(["" if v is None else v for v in r])
+
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{table}.csv"',
+        },
+    )
 
 
 @app.route("/api/connections/<conn_id>/tables/<path:table>/update", methods=["POST"])
@@ -895,7 +658,7 @@ def api_get_erd(conn_id):
         adapter = get_adapter(conn)
         adapter.connect()
         try:
-            erd_data = adapter.get_erd_data()
+            erd_data = get_erd_cached(conn_id, adapter)
         finally:
             adapter.disconnect()
     except Exception as e:
@@ -906,6 +669,263 @@ def api_get_erd(conn_id):
         for t in erd_data["tables"].values()
     )
     return jsonify({"erd": erd_data, "rel_count": rel_count}), 200
+
+
+# ── Saved views (SQL connections only) ──────────────────────────────────────────
+
+def _collect_view_tables(spec: dict) -> set:
+    tables = set()
+    if spec.get("base_table"):
+        tables.add(spec["base_table"])
+    for j in spec.get("joins") or []:
+        for k in ("from_table", "to_table"):
+            if j.get(k):
+                tables.add(j[k])
+    return tables
+
+
+def _validate_view_spec(conn_id: str, spec: dict, adapter) -> str | None:
+    """Return an error string if the spec references anything that isn't a real
+    table/column, else None. Guards identifier injection the way _parse_sort
+    guards ORDER BY — by allow-listing against live introspection."""
+    base = spec.get("base_table")
+    if not base:
+        return "View has no base table."
+
+    valid_tables = set(adapter.list_tables())
+    used_tables = _collect_view_tables(spec)
+    unknown = used_tables - valid_tables
+    if unknown:
+        return f"Unknown table(s): {', '.join(sorted(unknown))}"
+
+    cols_by_table = {
+        t: {c.get("name") for c in get_schema_cached(conn_id, adapter, t)}
+        for t in used_tables
+    }
+
+    for j in spec.get("joins") or []:
+        ft, fc = j.get("from_table"), j.get("from_col")
+        tt, tc = j.get("to_table"), j.get("to_col")
+        if fc not in cols_by_table.get(ft, set()):
+            return f"Unknown join column {ft}.{fc}"
+        if tc not in cols_by_table.get(tt, set()):
+            return f"Unknown join column {tt}.{tc}"
+
+    for c in spec.get("columns") or []:
+        t, col = c.get("table"), c.get("column")
+        if t not in used_tables or col not in cols_by_table.get(t, set()):
+            return f"Unknown column {t}.{col}"
+
+    filt = spec.get("filters")
+    conds = []
+    if isinstance(filt, dict):
+        if filt.get("advanced"):
+            conds = filt.get("conditions") or []
+        elif filt.get("column"):
+            conds = [filt]
+    for cond in conds:
+        t, col = cond.get("table"), cond.get("column")
+        if not col:
+            continue
+        if t:
+            if t not in used_tables or col not in cols_by_table.get(t, set()):
+                return f"Unknown filter column {t}.{col}"
+        elif not any(col in cols for cols in cols_by_table.values()):
+            return f"Unknown filter column {col}"
+
+    s = spec.get("sort")
+    if s and s.get("column"):
+        t = s.get("table")
+        if t and (t not in used_tables or s["column"] not in cols_by_table.get(t, set())):
+            return f"Unknown sort column {t}.{s['column']}"
+    return None
+
+
+@app.route("/api/connections/<conn_id>/views", methods=["GET"])
+def api_list_views(conn_id):
+    conns = load_connections()
+    if conn_id not in conns:
+        return jsonify({"error": "Connection not found"}), 404
+    return jsonify({"views": get_views_for(conn_id)}), 200
+
+
+@app.route("/api/connections/<conn_id>/views", methods=["POST"])
+def api_create_view(conn_id):
+    conns = load_connections()
+    if conn_id not in conns:
+        return jsonify({"error": "Connection not found"}), 404
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    spec = body.get("spec") or {}
+    if not name:
+        return jsonify({"error": "View name is required."}), 400
+    if not spec.get("base_table"):
+        return jsonify({"error": "View has no base table."}), 400
+
+    now = int(time.time() * 1000)
+    view = {
+        "id": "v_" + uuid.uuid4().hex[:12],
+        "name": name,
+        "spec": spec,
+        "created_at": now,
+        "updated_at": now,
+    }
+    views = load_views()
+    items = views.get(conn_id, [])
+    items.append(view)
+    views[conn_id] = items
+    save_views(views)
+    return jsonify(view), 201
+
+
+@app.route("/api/connections/<conn_id>/views/run", methods=["POST"])
+def api_run_view(conn_id):
+    conns = load_connections()
+    if conn_id not in conns:
+        return jsonify({"error": "Connection not found"}), 404
+    conn = conns[conn_id]
+    db_type = conn.get("db_type", "")
+    if db_type not in SQL_DB_TYPES:
+        return jsonify({"error": "Views are only supported on SQL connections."}), 400
+
+    body = request.get_json(silent=True) or {}
+    spec = body.get("spec") or {}
+    try:
+        page = max(1, int(body.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = max(1, min(500, int(body.get("page_size", 50))))
+    except (TypeError, ValueError):
+        page_size = 50
+
+    try:
+        start = time.monotonic()
+        adapter = get_adapter(conn)
+        adapter.connect()
+        try:
+            err = _validate_view_spec(conn_id, spec, adapter)
+            if err:
+                return jsonify({"error": err}), 400
+            sql, params = build_view_query(
+                spec,
+                quote_char=adapter.QUOTE_CHAR,
+                placeholder=adapter.PLACEHOLDER,
+                page=page,
+                page_size=page_size,
+            )
+            result = adapter.execute_select(sql, params)
+        finally:
+            adapter.disconnect()
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    # Surface SQL errors like the query editor does (200 + error field).
+    if result.get("error"):
+        return jsonify({"error": result["error"]}), 200
+
+    rows = result.get("rows", [])
+    has_next = len(rows) > page_size
+    rows = rows[:page_size]
+    return jsonify({
+        "columns": result.get("columns", []),
+        "rows": rows,
+        "page": page,
+        "page_size": page_size,
+        "has_next": has_next,
+        "total": None,  # COUNT over a join is expensive; has_next is exact
+        "elapsed_ms": int((time.monotonic() - start) * 1000),
+        "error": None,
+    }), 200
+
+
+@app.route("/api/connections/<conn_id>/views/<view_id>", methods=["GET"])
+def api_get_view(conn_id, view_id):
+    conns = load_connections()
+    if conn_id not in conns:
+        return jsonify({"error": "Connection not found"}), 404
+    for v in get_views_for(conn_id):
+        if v.get("id") == view_id:
+            return jsonify(v), 200
+    return jsonify({"error": "View not found"}), 404
+
+
+@app.route("/api/connections/<conn_id>/views/<view_id>", methods=["PUT"])
+def api_update_view(conn_id, view_id):
+    conns = load_connections()
+    if conn_id not in conns:
+        return jsonify({"error": "Connection not found"}), 404
+    body = request.get_json(silent=True) or {}
+
+    views = load_views()
+    items = views.get(conn_id, [])
+    for v in items:
+        if v.get("id") == view_id:
+            if "name" in body:
+                name = (body.get("name") or "").strip()
+                if not name:
+                    return jsonify({"error": "View name is required."}), 400
+                v["name"] = name
+            if "spec" in body:
+                spec = body.get("spec") or {}
+                if not spec.get("base_table"):
+                    return jsonify({"error": "View has no base table."}), 400
+                v["spec"] = spec
+            v["updated_at"] = int(time.time() * 1000)
+            views[conn_id] = items
+            save_views(views)
+            return jsonify(v), 200
+    return jsonify({"error": "View not found"}), 404
+
+
+@app.route("/api/connections/<conn_id>/views/<view_id>", methods=["DELETE"])
+def api_delete_view(conn_id, view_id):
+    conns = load_connections()
+    if conn_id not in conns:
+        return jsonify({"error": "Connection not found"}), 404
+    views = load_views()
+    items = views.get(conn_id, [])
+    remaining = [v for v in items if v.get("id") != view_id]
+    if len(remaining) == len(items):
+        return jsonify({"error": "View not found"}), 404
+    views[conn_id] = remaining
+    save_views(views)
+    return "", 204
+
+
+# ── Tools ──────────────────────────────────────────────────────────────────────
+# Standalone utilities that don't belong to a connection. OCR runs fully
+# locally (see ocr.py); nothing leaves the machine.
+
+OCR_MAX_BYTES = 20 * 1024 * 1024
+
+
+@app.route("/api/tools/ocr", methods=["POST"])
+def api_tools_ocr():
+    from ocr import OcrBadImage, OcrUnavailable, ocr_image
+
+    # get_data() first: it caches the body, so the multipart parse behind
+    # request.files still works; the reverse order consumes the stream and
+    # leaves raw (non-multipart) uploads empty.
+    raw = request.get_data()
+    upload = request.files.get("image")
+    data = upload.read() if upload else raw
+    if not data:
+        return jsonify({"error": "No image provided. Send multipart field 'image' or a raw body."}), 400
+    if len(data) > OCR_MAX_BYTES:
+        return jsonify({"error": f"Image too large (max {OCR_MAX_BYTES // (1024 * 1024)} MB)."}), 413
+
+    try:
+        result = ocr_image(data)
+    except OcrUnavailable as e:
+        return jsonify({"error": str(e)}), 503
+    except OcrBadImage as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"OCR failed: {e}"}), 500
+    return jsonify(result), 200
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

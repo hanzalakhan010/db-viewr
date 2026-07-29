@@ -31,7 +31,18 @@ export function AppLayout() {
             )}
           </span>
         )}
-        <div className="ml-auto text-xs text-sidebar-text">SPA preview</div>
+        <NavLink
+          to="/tools"
+          className={({ isActive }) =>
+            `ml-auto rounded px-2 py-1 text-sm ${
+              isActive
+                ? 'bg-sidebar-active text-white'
+                : 'text-sidebar-text hover:text-white'
+            }`
+          }
+        >
+          Tools
+        </NavLink>
       </header>
       <div className="flex min-h-0 flex-1">
         {conn ? <ConnSidebar conn={conn} /> : null}
@@ -64,6 +75,12 @@ function ConnSidebar({ conn }: { conn: string }) {
           className={({ isActive }) => `${link} ${isActive ? active : ''}`}
         >
           Tables
+        </NavLink>
+        <NavLink
+          to={`/c/${conn}/views`}
+          className={({ isActive }) => `${link} ${isActive ? active : ''}`}
+        >
+          Views
         </NavLink>
         <NavLink
           to={`/c/${conn}/query`}
