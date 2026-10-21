@@ -8,14 +8,32 @@ export class ApiError extends Error {
   }
 }
 
+const REQUEST_TIMEOUT_MS = 30_000
+
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const res = await fetch(path.startsWith('/') ? path : `/api/${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-    ...init,
-  })
+  const timeoutController = new AbortController()
+  const timeout = setTimeout(() => timeoutController.abort(), REQUEST_TIMEOUT_MS)
+  init?.signal?.addEventListener('abort', () => timeoutController.abort())
+
+  let res: Response
+  try {
+    res = await fetch(path.startsWith('/') ? path : `/api/${path}`, {
+      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+      ...init,
+      signal: timeoutController.signal,
+    })
+  } catch (e) {
+    if (timeoutController.signal.aborted) {
+      throw new ApiError('Request timed out. The database connection may be slow or unreachable.', 0, null)
+    }
+    throw e
+  } finally {
+    clearTimeout(timeout)
+  }
+
   const text = await res.text()
   const body: unknown = text ? safeJson(text) : null
   if (!res.ok) {
