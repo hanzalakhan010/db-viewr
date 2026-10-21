@@ -32,7 +32,6 @@ WORKDIR /app
 
 # Copy application source
 COPY adapters/ ./adapters/
-COPY templates/ ./templates/
 COPY static/    ./static/
 COPY app.py     .
 COPY storage.py .

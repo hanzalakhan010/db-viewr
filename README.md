@@ -1,14 +1,8 @@
 # db-viewr
 
 A lightweight, self-hosted database client that runs in your browser.
-Backend is Flask + adapter classes per DB type; there are two UIs sharing the
-same Flask process:
-
-- **Legacy UI** at `/` — server-rendered Jinja templates (the original).
-- **SPA** at `/app/` — React + TypeScript single-page app for faster
-  navigation.
-
-Both call the same underlying adapters; pick whichever feels nicer.
+Backend is Flask + adapter classes per DB type, serving JSON from `/api/*`
+to a React + TypeScript single-page app mounted at `/`.
 
 ## Features
 
@@ -38,7 +32,8 @@ Two prerequisites:
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 2. **Node 20+** — only needed if you want to (re)build the React SPA.
-   Skip if you only use the legacy UI at `/`.
+   The repo ships with a pre-built bundle at `static/dist/`, so this is
+   optional unless you're editing `frontend/`.
 
 Clone and install Python deps:
 
@@ -57,10 +52,7 @@ That's it. `uv sync` creates `.venv/` and installs everything from
 uv run app.py
 ```
 
-Open **http://localhost:5001** — both UIs are live:
-
-- Legacy UI: <http://localhost:5001/>
-- SPA: <http://localhost:5001/app/>
+Open **http://localhost:5001**.
 
 Saved connections live in `connections.json` next to `app.py`
 (gitignored, never committed). Query history lives in `query_history.json`.
@@ -158,7 +150,7 @@ For SPA development with HMR (auto-reload on save):
 uv run app.py
 # terminal 2
 cd frontend && npm run dev
-# open http://localhost:5173/app/  (Vite proxies /api → :5001)
+# open http://localhost:5173  (Vite proxies /api → :5001)
 ```
 
 ---
@@ -196,17 +188,15 @@ Environment variables, all optional:
 
 ```
 db-viewr/
-├── app.py                 # Flask app: HTML routes + /api/* JSON endpoints + /app SPA mount
+├── app.py                 # Flask app: /api/* JSON endpoints + SPA catch-all at /
 ├── pyproject.toml         # uv-managed Python deps
 ├── adapters/              # one file per DB type, all extending BaseAdapter
-├── templates/             # legacy server-rendered UI (Jinja)
 ├── static/
-│   ├── style.css / *.js   # legacy UI assets
-│   └── dist/              # built React SPA (gitignored; produced by `npm run build`)
+│   └── dist/              # built React SPA, served at / (produced by `npm run build`)
 ├── frontend/              # React + Vite + TS source for the SPA
 │   ├── src/
 │   └── package.json
-└── MIGRATION_NOTES.md     # decisions + open questions for the SPA migration
+└── MIGRATION_NOTES.md     # history of the Jinja → SPA migration
 ```
 
 ---
@@ -217,8 +207,7 @@ db-viewr/
 2. Implement `connect`, `disconnect`, `list_tables`, `get_schema`,
    `get_rows`, `execute_query`, `get_erd_data`.
 3. Register it in `adapters/__init__.py`.
-4. Add its form fields to `templates/connection_form.html` AND to the
-   SPA form at `frontend/src/pages/ConnectionFormPage.tsx`.
+4. Add its form fields to `frontend/src/pages/ConnectionFormPage.tsx`.
 
 ---
 

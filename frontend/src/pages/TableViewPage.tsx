@@ -42,6 +42,8 @@ export function TableViewPage() {
 
   const [editIdx, setEditIdx] = useState<number | null>(null)
   const [showInsert, setShowInsert] = useState(false)
+  const [density, setDensity] = useState<'compact' | 'comfortable'>('compact')
+  const compact = density === 'compact'
 
   // URL helpers — preserve other params, drop empty ones.
   const patch = (updates: Record<string, string | number | undefined | null>) => {
@@ -94,101 +96,115 @@ export function TableViewPage() {
         </div>
       )}
 
-      <div className="mb-3 flex flex-wrap items-end justify-between gap-3 rounded-lg border border-border bg-surface p-3">
-        <div className="flex-1 min-w-[20rem]">
-          {data && (
-            <FilterBar
-              dbType={dbType}
-              schema={schema}
-              initial={{
-                filter_col: searchParams.get('filter_col') ?? undefined,
-                filter_op: searchParams.get('filter_op') ?? undefined,
-                filter_val: searchParams.get('filter_val') ?? undefined,
-                filter_json: searchParams.get('filter_json') ?? undefined,
-                filter_fe: searchParams.get('filter_fe') ?? undefined,
-                filter_eav: searchParams.get('filter_eav') ?? undefined,
-                adv_filters: searchParams.get('adv_filters') ?? undefined,
-              }}
-              onApply={(p) => patch({ ...p, page: 1 })}
+      <div className="overflow-hidden rounded-lg border border-border bg-surface">
+        <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border p-3">
+          <div className="flex-1 min-w-[20rem]">
+            {data && (
+              <FilterBar
+                dbType={dbType}
+                schema={schema}
+                initial={{
+                  filter_col: searchParams.get('filter_col') ?? undefined,
+                  filter_op: searchParams.get('filter_op') ?? undefined,
+                  filter_val: searchParams.get('filter_val') ?? undefined,
+                  filter_json: searchParams.get('filter_json') ?? undefined,
+                  filter_fe: searchParams.get('filter_fe') ?? undefined,
+                  filter_eav: searchParams.get('filter_eav') ?? undefined,
+                  adv_filters: searchParams.get('adv_filters') ?? undefined,
+                }}
+                onApply={(p) => patch({ ...p, page: 1 })}
+              />
+            )}
+          </div>
+          <div className="flex items-end gap-2">
+            <button
+              type="button"
+              onClick={() => setDensity(compact ? 'comfortable' : 'compact')}
+              className="rounded border border-border bg-bg px-2.5 py-1.5 text-xs text-text"
+            >
+              {compact ? 'Comfortable' : 'Compact'}
+            </button>
+            <div>
+              <label className="block text-xs text-text-secondary">Page size</label>
+              <select
+                value={pageSize}
+                onChange={(e) => patch({ page_size: e.target.value, page: 1 })}
+                className="rounded border border-border bg-bg px-2 py-1 text-sm"
+              >
+                {PAGE_SIZES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <KebabMenu
+              items={[
+                { label: 'Insert row', onClick: () => setShowInsert(true) },
+                { label: 'Export CSV', href: csvHref },
+              ]}
             />
+          </div>
+        </div>
+
+        <div className={`overflow-auto ${isPlaceholderData ? 'opacity-60' : ''}`}>
+          {isLoading ? (
+            <div className="p-6"><Loading /></div>
+          ) : !data || rows.length === 0 ? (
+            <div className="p-6 text-text-secondary">No rows.</div>
+          ) : (
+            <table className="min-w-full text-sm">
+              <thead className="bg-bg">
+                <tr>
+                  <th
+                    className={`border-b border-border text-left font-medium text-text-secondary ${compact ? 'border-r border-border-light px-2 py-1 text-[11px]' : 'px-3 py-2 text-xs'}`}
+                  >
+                    ·
+                  </th>
+                  {cols.map((c) => {
+                    const isSorted = sortCol === c
+                    const colType = schema.find((s) => s.name === c)?.type
+                    return (
+                      <th
+                        key={c}
+                        onClick={() => onSort(c)}
+                        title={colType ? `${c}: ${colType}` : c}
+                        className={`cursor-pointer select-none border-b border-border text-left font-mono text-text-secondary hover:text-text ${compact ? 'border-r border-border-light px-2 py-1 text-[11px]' : 'px-3 py-2 text-xs'}`}
+                      >
+                        <span className="text-text">{c}</span>
+                        {colType && <span className="ml-1 text-muted">:{colType}</span>}
+                        {isSorted && <span className="ml-1 text-accent">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+                      </th>
+                    )
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => (
+                  <tr key={i} className="border-b border-border-light hover:bg-border-light/40">
+                    <td className={compact ? 'border-r border-border-light px-2 py-0.5' : 'px-3 py-1'}>
+                      <button
+                        type="button"
+                        onClick={() => setEditIdx(i)}
+                        className="text-[11px] text-info hover:underline"
+                      >
+                        Edit
+                      </button>
+                    </td>
+                    {row.map((v, j) => (
+                      <td
+                        key={j}
+                        className={`whitespace-nowrap font-mono ${compact ? 'border-r border-border-light px-2 py-0.5 text-[11px]' : 'px-3 py-1 text-xs'}`}
+                      >
+                        {v === null ? <span className="text-muted italic">NULL</span> : renderCell(v)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
-        <div className="flex items-end gap-2">
-          <div>
-            <label className="block text-xs text-text-secondary">Page size</label>
-            <select
-              value={pageSize}
-              onChange={(e) => patch({ page_size: e.target.value, page: 1 })}
-              className="rounded border border-border bg-bg px-2 py-1 text-sm"
-            >
-              {PAGE_SIZES.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </div>
-          <KebabMenu
-            items={[
-              { label: 'Insert row', onClick: () => setShowInsert(true) },
-              { label: 'Export CSV', href: csvHref },
-            ]}
-          />
-        </div>
-      </div>
-
-      <div
-        className={`overflow-auto rounded-lg border border-border bg-surface ${isPlaceholderData ? 'opacity-60' : ''}`}
-      >
-        {isLoading ? (
-          <div className="p-6"><Loading /></div>
-        ) : !data || rows.length === 0 ? (
-          <div className="p-6 text-text-secondary">No rows.</div>
-        ) : (
-          <table className="min-w-full text-sm">
-            <thead className="bg-bg">
-              <tr>
-                <th className="px-2 py-2 text-left text-xs font-medium text-text-secondary">·</th>
-                {cols.map((c) => {
-                  const isSorted = sortCol === c
-                  const colType = schema.find((s) => s.name === c)?.type
-                  return (
-                    <th
-                      key={c}
-                      onClick={() => onSort(c)}
-                      title={colType ? `${c}: ${colType}` : c}
-                      className="cursor-pointer select-none border-b border-border px-3 py-2 text-left font-mono text-xs text-text-secondary hover:text-text"
-                    >
-                      <span className="text-text">{c}</span>
-                      {colType && <span className="ml-1 text-muted">:{colType}</span>}
-                      {isSorted && <span className="ml-1 text-accent">{sortDir === 'asc' ? '↑' : '↓'}</span>}
-                    </th>
-                  )
-                })}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, i) => (
-                <tr key={i} className="border-b border-border-light hover:bg-border-light/40">
-                  <td className="px-2 py-1">
-                    <button
-                      type="button"
-                      onClick={() => setEditIdx(i)}
-                      className="text-xs text-info hover:underline"
-                    >
-                      Edit
-                    </button>
-                  </td>
-                  {row.map((v, j) => (
-                    <td key={j} className="whitespace-nowrap px-3 py-1 font-mono text-xs">
-                      {v === null ? <span className="text-muted italic">NULL</span> : renderCell(v)}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
       </div>
 
       <div className="mt-3 flex items-center justify-between text-sm text-text-secondary">

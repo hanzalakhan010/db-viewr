@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AppLayout } from '@/layout/AppLayout'
@@ -8,6 +9,8 @@ import { TableViewPage } from '@/pages/TableViewPage'
 import { QueryPage } from '@/pages/QueryPage'
 import { ErdPage } from '@/pages/ErdPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
+import { useThemeStore } from '@/lib/store'
+import { applyTheme } from '@/lib/themes'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -16,9 +19,12 @@ const queryClient = new QueryClient({
 })
 
 export default function App() {
+  const theme = useThemeStore((s) => s.theme)
+  useEffect(() => applyTheme(theme), [theme])
+
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter basename="/app">
+      <BrowserRouter>
         <Routes>
           <Route element={<AppLayout />}>
             <Route index element={<ConnectionsPage />} />

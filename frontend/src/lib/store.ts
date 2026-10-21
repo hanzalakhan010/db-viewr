@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import type { QueryResult } from './types'
+import { type ThemeKey } from './themes'
 
 interface QueryState {
   query: string
@@ -47,3 +48,18 @@ export function useQueryFor(conn: string | undefined): string {
 export function useResultFor(conn: string | undefined): QueryResult | null {
   return useUIStore((s) => (conn ? s.queryByConn[conn]?.result ?? null : null))
 }
+
+interface ThemeState {
+  theme: ThemeKey
+  setTheme: (theme: ThemeKey) => void
+}
+
+export const useThemeStore = create<ThemeState>()(
+  persist(
+    (set) => ({
+      theme: 'slate',
+      setTheme: (theme) => set({ theme }),
+    }),
+    { name: 'db-viewr-theme' },
+  ),
+)

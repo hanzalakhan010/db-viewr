@@ -66,4 +66,7 @@ Phase 2 — tables list API + SPA
 Phase 3 — table view API + SPA (rows, filters, sort, page, edit, insert)
 Phase 4 — query runner API + SPA (+ history)
 Phase 5 — ERD API + SPA
-~~Phase 6~~ — not happening. SPA + legacy coexist permanently.
+Phase 6 — flip complete. The SPA moved from `/app/*` to `/`; the legacy
+Jinja routes/templates and `static/app.js` were removed. `/api/*` and the
+raw `/connections/<id>/tables/<table>/export.csv` route are the only
+non-SPA paths left; everything else falls through to the SPA catch-all.
