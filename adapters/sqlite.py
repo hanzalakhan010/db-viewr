@@ -15,6 +15,9 @@ def _sqlite_regexp(pattern, value):
 
 class SQLiteAdapter(BaseAdapter):
 
+    QUOTE_CHAR = '"'
+    PLACEHOLDER = "?"
+
     def connect(self):
         self._conn = sqlite3.connect(self.config["path"])
         self._conn.row_factory = sqlite3.Row
@@ -83,6 +86,16 @@ class SQLiteAdapter(BaseAdapter):
                 return {"columns": [], "rows": [], "affected": affected, "error": None}
         except Exception as e:
             return {"columns": [], "rows": [], "affected": None, "error": str(e)}
+
+    def execute_select(self, sql: str, params: list | None = None) -> dict:
+        try:
+            cur = self._conn.execute(sql, params or [])
+            columns = [d[0] for d in cur.description] if cur.description else []
+            rows = [list(r) for r in cur.fetchall()]
+            self._conn.rollback()  # read-only: never persist
+            return {"columns": columns, "rows": rows, "error": None}
+        except Exception as e:
+            return {"columns": [], "rows": [], "error": str(e)}
 
     def update_row(self, table: str, identity: dict, new_values: dict) -> dict:
         if not identity:

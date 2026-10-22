@@ -7,6 +7,10 @@ import { TablesPage } from '@/pages/TablesPage'
 import { TableViewPage } from '@/pages/TableViewPage'
 import { QueryPage } from '@/pages/QueryPage'
 import { ErdPage } from '@/pages/ErdPage'
+import { ViewsListPage } from '@/pages/Views/ViewsListPage'
+import { ViewBuilderPage } from '@/pages/Views/ViewBuilderPage'
+import { ToolsPage } from '@/pages/Tools/ToolsPage'
+import { OcrToolPage } from '@/pages/Tools/OcrToolPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 
 const queryClient = new QueryClient({
@@ -18,7 +22,7 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter basename="/app">
+      <BrowserRouter>
         <Routes>
           <Route element={<AppLayout />}>
             <Route index element={<ConnectionsPage />} />
@@ -26,8 +30,13 @@ export default function App() {
             <Route path="c/:conn/edit" element={<ConnectionFormPage mode="edit" />} />
             <Route path="c/:conn" element={<TablesPage />} />
             <Route path="c/:conn/t/:table" element={<TableViewPage />} />
+            <Route path="c/:conn/views" element={<ViewsListPage />} />
+            <Route path="c/:conn/views/new" element={<ViewBuilderPage />} />
+            <Route path="c/:conn/views/:vid" element={<ViewBuilderPage />} />
             <Route path="c/:conn/query" element={<QueryPage />} />
             <Route path="c/:conn/erd" element={<ErdPage />} />
+            <Route path="tools" element={<ToolsPage />} />
+            <Route path="tools/ocr" element={<OcrToolPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>
         </Routes>

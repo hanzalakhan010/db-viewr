@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/api'
-import type { TableRowsResponse } from '@/lib/types'
+import type { OutboundRef, TableRowsResponse } from '@/lib/types'
 import { Loading } from '@/components/Spinner'
 import { useConnectionName } from '@/lib/useConnection'
 import { KebabMenu } from '@/components/KebabMenu'
@@ -22,6 +22,7 @@ export function TableViewPage() {
   const { conn, table } = useParams<{ conn: string; table: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
   const qc = useQueryClient()
+  const navigate = useNavigate()
 
   const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10) || 1)
   const pageSize = Math.min(500, parseInt(searchParams.get('page_size') ?? '50', 10) || 50)
@@ -62,9 +63,15 @@ export function TableViewPage() {
   }
 
   const csvHref = useMemo(
-    () => `/connections/${conn}/tables/${encodeURIComponent(table ?? '')}/export.csv${queryString ? `?${queryString}` : ''}`,
+    () => `/api/connections/${conn}/tables/${encodeURIComponent(table ?? '')}/export.csv${queryString ? `?${queryString}` : ''}`,
     [conn, table, queryString],
   )
+
+  // Build a link to another table filtered to a single value — the primitive
+  // behind "follow the FK edge" (outbound) and "jump to referrers" (inbound).
+  const filterPath = (t: string, col: string, val: unknown) =>
+    `/c/${conn}/t/${encodeURIComponent(t)}?` +
+    new URLSearchParams({ filter_col: col, filter_op: '=', filter_val: String(val) }).toString()
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['tableRows', conn, table] })
@@ -77,6 +84,14 @@ export function TableViewPage() {
   const hasNext = data?.data.has_next ?? false
   const dbType = data?.db_type ?? ''
   const connName = useConnectionName(conn)
+
+  // FK edges for this table (SQL connections only; empty otherwise).
+  const outboundByCol = useMemo(() => {
+    const m = new Map<string, OutboundRef>()
+    for (const fk of data?.relations?.outbound ?? []) m.set(fk.column, fk)
+    return m
+  }, [data])
+  const inbound = data?.relations?.inbound ?? []
 
   return (
     <div>
@@ -130,6 +145,13 @@ export function TableViewPage() {
           </div>
           <KebabMenu
             items={[
+              ...(dbType === 'postgresql' || dbType === 'mysql' || dbType === 'sqlite'
+                ? [{
+                    label: 'Open in view builder',
+                    onClick: () =>
+                      navigate(`/c/${conn}/views/new?base=${encodeURIComponent(table ?? '')}`),
+                  }]
+                : []),
               { label: 'Insert row', onClick: () => setShowInsert(true) },
               { label: 'Export CSV', href: csvHref },
             ]}
@@ -171,19 +193,50 @@ export function TableViewPage() {
               {rows.map((row, i) => (
                 <tr key={i} className="border-b border-border-light hover:bg-border-light/40">
                   <td className="px-2 py-1">
-                    <button
-                      type="button"
-                      onClick={() => setEditIdx(i)}
-                      className="text-xs text-info hover:underline"
-                    >
-                      Edit
-                    </button>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setEditIdx(i)}
+                        className="text-xs text-info hover:underline"
+                      >
+                        Edit
+                      </button>
+                      {inbound.length > 0 && (
+                        <KebabMenu
+                          align="left"
+                          items={inbound.flatMap((rel) => {
+                            const idx = cols.indexOf(rel.ref_column)
+                            const val = idx >= 0 ? row[idx] : null
+                            if (val === null || val === undefined) return []
+                            return [{
+                              label: `↳ ${rel.from_table} · ${rel.from_column}`,
+                              onClick: () => navigate(filterPath(rel.from_table, rel.from_column, val)),
+                            }]
+                          })}
+                        />
+                      )}
+                    </div>
                   </td>
-                  {row.map((v, j) => (
-                    <td key={j} className="whitespace-nowrap px-3 py-1 font-mono text-xs">
-                      {v === null ? <span className="text-muted italic">NULL</span> : renderCell(v)}
-                    </td>
-                  ))}
+                  {row.map((v, j) => {
+                    const fk = outboundByCol.get(cols[j])
+                    return (
+                      <td key={j} className="whitespace-nowrap px-3 py-1 font-mono text-xs">
+                        {v === null ? (
+                          <span className="text-muted italic">NULL</span>
+                        ) : fk && v !== undefined ? (
+                          <Link
+                            to={filterPath(fk.ref_table, fk.ref_column, v)}
+                            title={`→ ${fk.ref_table}.${fk.ref_column}`}
+                            className="text-info hover:underline"
+                          >
+                            {renderCell(v)}
+                          </Link>
+                        ) : (
+                          renderCell(v)
+                        )}
+                      </td>
+                    )
+                  })}
                 </tr>
               ))}
             </tbody>

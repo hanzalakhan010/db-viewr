@@ -12,3 +12,6 @@ frontend/node_modules/
 # Local data with credentials and query history — NEVER commit
 connections.json
 query_history.json
+
+# Saved views are local data too (per-connection view specs)
+views.json

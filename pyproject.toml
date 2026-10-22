@@ -12,4 +12,5 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "pymongo>=4.6",
     "pymysql>=1.1",
+    "rapidocr-onnxruntime>=1.4.4",
 ]

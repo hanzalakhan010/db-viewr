@@ -1,21 +1,27 @@
-import { type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/api'
-import type { QueryHistoryResponse, QueryResult } from '@/lib/types'
-import { useConnectionName } from '@/lib/useConnection'
+import type { QueryHistoryResponse, QueryResult, ScriptRunResponse } from '@/lib/types'
+import { useConnection, useConnectionName } from '@/lib/useConnection'
 import { useQueryFor, useResultFor, useUIStore } from '@/lib/store'
 import { Spinner } from '@/components/Spinner'
+import { ResultTable } from '@/components/ResultTable'
+import { ScriptResult } from '@/components/ScriptResult'
 
-function renderCell(v: unknown): string {
-  if (v === null || v === undefined) return ''
-  if (typeof v === 'object') return JSON.stringify(v)
-  return String(v)
+const SQL_DB_TYPES = ['postgresql', 'mysql', 'sqlite']
+const SCRIPT_MAX_BYTES = 5 * 1024 * 1024
+
+function isSqlFile(f: File): boolean {
+  return f.name.toLowerCase().endsWith('.sql')
 }
 
 export function QueryPage() {
   const { conn } = useParams<{ conn: string }>()
   const connName = useConnectionName(conn)
+  const { data: connData } = useConnection(conn)
+  const dbType = connData?.connection.db_type
+  const scriptSupported = !dbType || SQL_DB_TYPES.includes(dbType)
   const qc = useQueryClient()
   const query = useQueryFor(conn)
   const result = useResultFor(conn)
@@ -27,6 +33,14 @@ export function QueryPage() {
   const setResult = (r: QueryResult | null) => {
     if (conn) storeSetResult(conn, r)
   }
+
+  // Script reports stay in component state: the zustand store persists to
+  // sessionStorage (~5MB) and a large report would blow the quota.
+  const [scriptResult, setScriptResult] = useState<ScriptRunResponse | null>(null)
+  const [scriptError, setScriptError] = useState<string | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const [stopOnError, setStopOnError] = useState(true)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const historyKey = ['queryHistory', conn]
   const { data: historyData } = useQuery({
@@ -43,9 +57,13 @@ export function QueryPage() {
       }),
     onSuccess: (res) => {
       setResult(res)
+      setScriptResult(null)
+      setScriptError(null)
       qc.invalidateQueries({ queryKey: historyKey })
     },
     onError: (e: unknown) => {
+      setScriptResult(null)
+      setScriptError(null)
       setResult({
         columns: [],
         rows: [],
@@ -53,6 +71,36 @@ export function QueryPage() {
         error: e instanceof Error ? e.message : 'Request failed',
         elapsed_ms: null,
       })
+    },
+  })
+
+  const scriptMut = useMutation({
+    mutationFn: async (file: File) => {
+      // Raw fetch, not apiFetch: apiFetch forces a JSON Content-Type, which
+      // would clobber the multipart boundary.
+      const form = new FormData()
+      form.append('file', file)
+      form.append('stop_on_error', String(stopOnError))
+      const res = await fetch(`/api/connections/${conn}/query/script`, {
+        method: 'POST',
+        body: form,
+      })
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        throw new Error(body?.error ?? `Upload failed (${res.status})`)
+      }
+      return body as ScriptRunResponse
+    },
+    onSuccess: (res) => {
+      setScriptResult(res)
+      setScriptError(null)
+      setResult(null)
+      qc.invalidateQueries({ queryKey: historyKey })
+      qc.invalidateQueries({ queryKey: ['tables', conn] })
+    },
+    onError: (e: unknown) => {
+      setScriptResult(null)
+      setScriptError(e instanceof Error ? e.message : 'Upload failed')
     },
   })
 
@@ -76,12 +124,47 @@ export function QueryPage() {
     runMut.mutate(q)
   }
 
+  const runScript = (file: File) => {
+    if (scriptMut.isPending) return
+    if (!isSqlFile(file)) {
+      setScriptResult(null)
+      setScriptError(`"${file.name}" is not a .sql file.`)
+      return
+    }
+    if (file.size > SCRIPT_MAX_BYTES) {
+      setScriptResult(null)
+      setScriptError(`"${file.name}" is too large (max 5 MB).`)
+      return
+    }
+    // This executes DDL/DML against a live database — confirm before it runs.
+    const kb = Math.max(1, Math.round(file.size / 1024))
+    if (!window.confirm(`Run "${file.name}" (${kb} KB) against ${connName}?`)) return
+    setScriptError(null)
+    scriptMut.mutate(file)
+  }
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault()
       run()
     }
   }
+
+  // Ctrl+V of a copied .sql *file*. Plain text pastes carry no files, so the
+  // textarea's normal paste is untouched.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const files = Array.from(e.clipboardData?.files ?? [])
+      const sql = files.find(isSqlFile)
+      if (!sql) return
+      e.preventDefault()
+      runScript(sql)
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
+    // No dep array on purpose — re-binding each render keeps the handler's view
+    // of stopOnError and the pending flag current without threading refs.
+  })
 
   const history = historyData?.history ?? []
   const cols = result?.columns ?? []
@@ -109,16 +192,39 @@ export function QueryPage() {
               </span>
             )}
           </div>
-          <textarea
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={onKeyDown}
-            rows={10}
-            spellCheck={false}
-            className="w-full rounded-lg border border-border bg-surface p-3 font-mono text-sm focus:border-accent focus:outline-none"
-            placeholder="-- write a query..."
-          />
-          <div className="mt-2 flex items-center gap-2">
+          <div
+            onDragOver={(e) => {
+              if (!scriptSupported) return
+              e.preventDefault()
+              setDragging(true)
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              if (!scriptSupported) return
+              e.preventDefault()
+              setDragging(false)
+              const file = e.dataTransfer.files?.[0]
+              if (file) runScript(file)
+            }}
+            className={`relative rounded-lg ${dragging ? 'ring-2 ring-accent' : ''}`}
+          >
+            <textarea
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={onKeyDown}
+              rows={10}
+              spellCheck={false}
+              className="w-full rounded-lg border border-border bg-surface p-3 font-mono text-sm focus:border-accent focus:outline-none"
+              placeholder="-- write a query, or drop a .sql file here..."
+            />
+            {dragging && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg bg-surface/80 text-sm text-accent">
+                Drop a .sql file to run it
+              </div>
+            )}
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={run}
@@ -133,48 +239,66 @@ export function QueryPage() {
                 'Run query'
               )}
             </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".sql,text/plain"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                e.target.value = '' // let the same file be picked again
+                if (file) runScript(file)
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={scriptMut.isPending || !scriptSupported}
+              title={
+                scriptSupported
+                  ? 'Upload a .sql file and run its statements in order'
+                  : 'Script upload is only available for SQL databases'
+              }
+              className="rounded border border-border px-3 py-1.5 text-sm text-text-secondary hover:border-accent hover:text-text disabled:opacity-50"
+            >
+              {scriptMut.isPending ? (
+                <span className="inline-flex items-center gap-2">
+                  <Spinner /> Running script…
+                </span>
+              ) : (
+                'Run .sql file…'
+              )}
+            </button>
+
+            {scriptSupported && (
+              <label className="flex items-center gap-1.5 text-xs text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={stopOnError}
+                  onChange={(e) => setStopOnError(e.target.checked)}
+                />
+                Stop on first error
+              </label>
+            )}
+            {scriptSupported && (
+              <span className="text-xs text-muted">or drop / paste a .sql file</span>
+            )}
           </div>
 
           <div className="mt-4">
-            {result?.error ? (
+            {scriptError ? (
+              <div className="rounded border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+                <strong>Error:</strong> {scriptError}
+              </div>
+            ) : scriptResult ? (
+              <ScriptResult result={scriptResult} />
+            ) : result?.error ? (
               <div className="rounded border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
                 <strong>Error:</strong> {result.error}
               </div>
             ) : result && cols.length > 0 ? (
-              <div className="overflow-auto rounded-lg border border-border bg-surface">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-bg">
-                    <tr>
-                      {cols.map((c) => (
-                        <th
-                          key={c}
-                          className="border-b border-border px-3 py-2 text-left font-mono text-xs text-text-secondary"
-                        >
-                          {c}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((row, i) => (
-                      <tr key={i} className="border-b border-border-light hover:bg-border-light/40">
-                        {row.map((v, j) => (
-                          <td key={j} className="whitespace-nowrap px-3 py-1 font-mono text-xs">
-                            {v === null ? (
-                              <span className="text-muted italic">NULL</span>
-                            ) : (
-                              renderCell(v)
-                            )}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <div className="border-t border-border-light px-3 py-1.5 text-xs text-text-secondary">
-                  {rows.length} row{rows.length === 1 ? '' : 's'}
-                </div>
-              </div>
+              <ResultTable columns={cols} rows={rows} />
             ) : result ? (
               <div className="rounded border border-success/40 bg-success/10 px-3 py-2 text-sm text-success">
                 Query OK

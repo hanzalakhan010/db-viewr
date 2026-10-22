@@ -53,7 +53,13 @@ def build_where(
         val2 = cond.get("value2", "")
         if not col:
             continue
+        # A condition may be table-qualified (used by saved views, where the
+        # same column name can exist in several joined tables). Quote each
+        # identifier part separately so the dot isn't swallowed by the quotes.
+        tbl = (cond.get("table") or "").strip()
         q = _quote(col, quote_char)
+        if tbl:
+            q = _quote(tbl, quote_char) + "." + q
 
         if op in {"=", "!=", ">", "<", ">=", "<="}:
             parts.append(f"{q} {op} {placeholder}")

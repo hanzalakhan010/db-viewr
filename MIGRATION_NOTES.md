@@ -5,14 +5,14 @@
 - **Layout:** `frontend/` sibling to `app.py`. Build output → `static/dist/`.
 - **Hosting:** Flask serves built SPA. Same-origin, no CORS.
 - **Dev workflow:** Vite dev on :5173 with proxy `/api → :5000`. Two terminals.
-- **Migration mode:** Additive. Existing Flask HTML routes/templates untouched. SPA mounted at `/app/*`. Legacy UI stays at `/` — no flip planned.
+- **Migration mode:** Complete. Legacy Flask HTML routes/templates removed; the SPA is served at `/` and is the only UI.
 - **API:** New `/api/*` JSON endpoints added alongside current HTML routes.
 - **Routing (SPA):**
-  - `/app/` → connections
-  - `/app/c/:conn` → tables list
-  - `/app/c/:conn/t/:table` → table view
-  - `/app/c/:conn/query` → query runner
-  - `/app/c/:conn/erd` → ERD
+  - `/` → connections
+  - `/c/:conn` → tables list
+  - `/c/:conn/t/:table` → table view
+  - `/c/:conn/query` → query runner
+  - `/c/:conn/erd` → ERD
 - **Visual:** Keep current look. Port styles to Tailwind utilities matching existing palette/spacing.
 - **State storage:** `connections.json` stays. Query history file stays.
 - **Auth:** None (single-user local app).

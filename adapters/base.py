@@ -26,6 +26,12 @@ def resolve_host_with_timeout(host: str, port: int, timeout: float = 10) -> None
 class BaseAdapter(ABC):
     """Abstract base for all DB adapters."""
 
+    # Dialect config consumed by the saved-view SQL compiler. SQL adapters
+    # override these; non-SQL adapters never reach the compiler (views are
+    # restricted to SQL connections).
+    QUOTE_CHAR = '"'
+    PLACEHOLDER = "?"
+
     def __init__(self, config: dict):
         self.config = config
         self._conn = None
@@ -133,3 +139,14 @@ class BaseAdapter(ABC):
         MongoDB/DynamoDB return empty foreign_keys lists and has_relations=False.
         """
         ...
+
+    # ── Saved views (SQL adapters only) ──────────────────────────────────────
+
+    def execute_select(self, sql: str, params: list | None = None) -> dict:
+        """Run a read-only, parameterised SELECT for a saved view.
+
+        Always rolls back so a view can never mutate data, regardless of what
+        SQL was compiled. Returns {columns, rows, error}. Non-SQL adapters
+        don't support views and inherit this NotImplementedError.
+        """
+        raise NotImplementedError("This connection type does not support views.")

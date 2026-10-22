@@ -20,9 +20,12 @@ LABEL org.opencontainers.image.title="db-viewr" \
       org.opencontainers.image.description="Lightweight Flask-powered database client" \
       org.opencontainers.image.source="https://github.com/your-org/db-viewr"
 
-# Runtime OS libs only
+# Runtime OS libs only (libgl1/libglib2.0-0 are needed by opencv, which
+# rapidocr-onnxruntime uses for the OCR tool)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
+        libgl1 \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from build stage
@@ -32,10 +35,10 @@ WORKDIR /app
 
 # Copy application source
 COPY adapters/ ./adapters/
-COPY templates/ ./templates/
 COPY static/    ./static/
 COPY app.py     .
 COPY storage.py .
+COPY ocr.py     .
 
 # Create data directory for connections.json persistence
 # (can be overridden by mounting a volume at /data)
