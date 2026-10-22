@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { OcrResponse } from '@/lib/types'
 import { cn } from '@/lib/utils'
+import { copyToClipboard } from '@/lib/clipboard'
 import { Loading } from '@/components/Spinner'
 
 type ResultTab = 'text' | 'lines'
@@ -84,7 +85,8 @@ export function OcrToolPage() {
 
   const copyText = async () => {
     if (!result) return
-    await navigator.clipboard.writeText(result.text)
+    // Shared helper swallows a denied clipboard permission instead of throwing.
+    if (!(await copyToClipboard(result.text))) return
     setCopied(true)
     window.setTimeout(() => setCopied(false), 1500)
   }

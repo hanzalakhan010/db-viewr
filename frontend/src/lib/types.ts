@@ -128,6 +128,32 @@ export interface QueryResult {
   elapsed_ms: number | null
 }
 
+export interface ScriptStatementResult {
+  index: number
+  /** Truncated to ~2000 chars server-side, so this may end in an ellipsis. */
+  sql: string
+  status: 'ok' | 'error' | 'skipped'
+  columns: string[]
+  rows: unknown[][]
+  affected: number | null
+  error: string | null
+  elapsed_ms: number | null
+  /** Server capped the row list at 500 for this statement. */
+  truncated: boolean
+}
+
+export interface ScriptRunResponse {
+  filename: string | null
+  total: number
+  ok: number
+  failed: number
+  skipped: number
+  elapsed_ms: number
+  /** Connection-level failure, distinct from a per-statement SQL error. */
+  error: string | null
+  statements: ScriptStatementResult[]
+}
+
 export interface ErdForeignKey {
   column: string
   ref_table: string

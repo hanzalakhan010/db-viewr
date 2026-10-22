@@ -611,6 +611,144 @@ def api_run_query(conn_id):
     }), 200
 
 
+# ── .sql script runner ─────────────────────────────────────────────────────────
+# /query sends one string straight to the driver, which is exactly what a script
+# file can't be: sqlite3 rejects multi-statement input and PyMySQL disallows it.
+# So split here and run the statements one at a time over a single connection.
+
+SQL_SCRIPT_MAX_BYTES = 5 * 1024 * 1024
+SCRIPT_MAX_ROWS_PER_STMT = 500
+SCRIPT_SQL_PREVIEW_CHARS = 2000
+
+
+def _truncate_sql(stmt: str) -> str:
+    if len(stmt) <= SCRIPT_SQL_PREVIEW_CHARS:
+        return stmt
+    return stmt[:SCRIPT_SQL_PREVIEW_CHARS] + "…"
+
+
+@app.route("/api/connections/<conn_id>/query/script", methods=["POST"])
+def api_run_query_script(conn_id):
+    from sql_script import split_statements
+
+    conns = load_connections()
+    if conn_id not in conns:
+        return jsonify({"error": "Connection not found"}), 404
+    conn = conns[conn_id]
+    db_type = conn.get("db_type", "")
+    if db_type not in SQL_DB_TYPES:
+        return jsonify({
+            "error": f"Script upload is only supported for SQL databases "
+                     f"(postgresql, mysql, sqlite) — this connection is {db_type or 'unknown'}."
+        }), 400
+
+    # get_data() first: it caches the body, so the multipart parse behind
+    # request.files still works; the reverse order consumes the stream and
+    # leaves raw (non-multipart) uploads empty. Same ordering as /api/tools/ocr.
+    raw = request.get_data()
+    upload = request.files.get("file")
+    filename = None
+    stop_on_error = True
+
+    if upload is not None:
+        blob = upload.read()
+        filename = upload.filename or None
+        stop_on_error = (request.form.get("stop_on_error", "true").lower()
+                         not in ("false", "0", "no"))
+    else:
+        body = request.get_json(silent=True)
+        if isinstance(body, dict):
+            blob = (body.get("sql") or "").encode("utf-8")
+            filename = body.get("filename") or None
+            stop_on_error = bool(body.get("stop_on_error", True))
+        else:
+            blob = raw
+
+    if len(blob) > SQL_SCRIPT_MAX_BYTES:
+        return jsonify({
+            "error": f"Script too large (max {SQL_SCRIPT_MAX_BYTES // (1024 * 1024)} MB)."
+        }), 413
+
+    text = blob.decode("utf-8", errors="replace")
+    statements = split_statements(text)
+
+    if not statements:
+        return jsonify({
+            "filename": filename,
+            "total": 0, "ok": 0, "failed": 0, "skipped": 0,
+            "elapsed_ms": 0, "error": None, "statements": [],
+        }), 200
+
+    # One history entry for the whole upload — one per statement would bury the
+    # sidebar under a single file.
+    label = filename or "pasted script"
+    append_history(conn_id, f"-- script: {label} ({len(statements)} statements)")
+
+    results = []
+    ok = failed = skipped = 0
+    script_start = time.monotonic()
+
+    try:
+        adapter = get_adapter(conn)
+        adapter.connect()
+        try:
+            halted = False
+            for idx, stmt in enumerate(statements):
+                if halted:
+                    results.append({
+                        "index": idx, "sql": _truncate_sql(stmt), "status": "skipped",
+                        "columns": [], "rows": [], "affected": None,
+                        "error": None, "elapsed_ms": None, "truncated": False,
+                    })
+                    skipped += 1
+                    continue
+
+                start = time.monotonic()
+                res = adapter.execute_query(stmt)
+                elapsed_ms = int((time.monotonic() - start) * 1000)
+                err = res.get("error")
+                rows = res.get("rows") or []
+                truncated = len(rows) > SCRIPT_MAX_ROWS_PER_STMT
+
+                results.append({
+                    "index": idx,
+                    "sql": _truncate_sql(stmt),
+                    "status": "error" if err else "ok",
+                    "columns": res.get("columns") or [],
+                    "rows": rows[:SCRIPT_MAX_ROWS_PER_STMT],
+                    "affected": res.get("affected"),
+                    "error": err,
+                    "elapsed_ms": elapsed_ms,
+                    "truncated": truncated,
+                })
+                if err:
+                    failed += 1
+                    if stop_on_error:
+                        halted = True
+                else:
+                    ok += 1
+        finally:
+            adapter.disconnect()
+        invalidate_schema_cache(conn_id)  # scripts are usually DDL
+    except Exception as e:
+        # Connection-level failure — report whatever ran before it blew up.
+        return jsonify({
+            "filename": filename,
+            "total": len(statements), "ok": ok, "failed": failed, "skipped": skipped,
+            "elapsed_ms": int((time.monotonic() - script_start) * 1000),
+            "error": str(e),
+            "statements": results,
+        }), 200
+
+    return jsonify({
+        "filename": filename,
+        "total": len(statements), "ok": ok, "failed": failed, "skipped": skipped,
+        "elapsed_ms": int((time.monotonic() - script_start) * 1000),
+        "error": None,
+        "statements": results,
+    }), 200
+
+
 @app.route("/api/connections/<conn_id>/query/history", methods=["GET"])
 def api_get_query_history(conn_id):
     conns = load_connections()
